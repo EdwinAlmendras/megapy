@@ -6,6 +6,7 @@ Implements Strategy Pattern for encryption algorithms.
 import os
 import struct
 import threading
+import queue
 from abc import ABC, abstractmethod
 from typing import Optional
 from Crypto.Cipher import AES
@@ -38,7 +39,7 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
     MEGA's AES-CTR encryption with CBC-MAC.
     
     Uses AES-CTR for encryption and CBC-MAC for integrity.
-    Thread-safe implementation with optimized MAC calculation.
+    MAC calculation runs in background thread for performance.
     """
     
     AES_BLOCK_SIZE = 16
@@ -81,6 +82,12 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
         self._mac_accumulator = bytearray(16)
         self._mac_lock = threading.Lock()
         
+        # Background MAC processing
+        self._mac_queue = queue.Queue()
+        self._processing_complete = threading.Event()
+        self._mac_thread = threading.Thread(target=self._process_mac_queue, daemon=True)
+        self._mac_thread.start()
+        
         # Track chunk order
         self._last_index = -1
         self._cipher_lock = threading.Lock()
@@ -92,14 +99,14 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
     
     def encrypt_chunk(self, chunk_index: int, data: bytes) -> bytes:
         """
-        Encrypt a chunk using AES-CTR and update MAC.
+        Encrypt a chunk using AES-CTR. MAC calculated in background.
         
         Args:
             chunk_index: Index of the chunk
             data: Raw data to encrypt
             
         Returns:
-            Encrypted data
+            Encrypted data (immediately, MAC runs in background)
         """
         # Verify sequential order (CTR mode requirement)
         if chunk_index != self._last_index + 1:
@@ -109,17 +116,40 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
             )
         self._last_index = chunk_index
         
-        # Encrypt with CTR mode
+        # Encrypt with CTR mode (fast)
         with self._cipher_lock:
             encrypted = self._cipher.encrypt(data)
         
-        # Calculate and accumulate MAC
-        chunk_mac = self._calculate_chunk_mac(data)
-        with self._mac_lock:
-            xored = strxor(bytes(self._mac_accumulator), chunk_mac)
-            self._mac_accumulator = bytearray(self._mac_cipher.encrypt(xored))
+        # Queue data for background MAC calculation (non-blocking)
+        self._mac_queue.put(bytes(data))
         
         return encrypted
+    
+    def _process_mac_queue(self):
+        """Background thread: process MAC queue."""
+        while True:
+            try:
+                item = self._mac_queue.get(timeout=0.1)
+                
+                if item is None:
+                    # Signal to finish
+                    self._mac_queue.task_done()
+                    break
+                
+                # Calculate chunk MAC
+                chunk_mac = self._calculate_chunk_mac(item)
+                
+                # Update accumulator
+                with self._mac_lock:
+                    xored = strxor(bytes(self._mac_accumulator), chunk_mac)
+                    self._mac_accumulator = bytearray(self._mac_cipher.encrypt(xored))
+                
+                self._mac_queue.task_done()
+                
+            except queue.Empty:
+                continue
+        
+        self._processing_complete.set()
     
     def _calculate_chunk_mac(self, data: bytes) -> bytes:
         """
@@ -149,13 +179,24 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
         
         return bytes(mac)
     
-    def finalize(self) -> bytes:
+    def finalize(self, timeout: float = 30.0) -> bytes:
         """
         Finalize encryption and generate MEGA file key.
+        
+        Waits for background MAC processing to complete.
+        
+        Args:
+            timeout: Max seconds to wait for MAC processing
         
         Returns:
             32-byte file key in MEGA format
         """
+        # Signal MAC thread to finish
+        self._mac_queue.put(None)
+        
+        # Wait for all MACs to be processed
+        self._processing_complete.wait(timeout=timeout)
+        
         # Calculate meta-MAC
         with self._mac_lock:
             mac_data = bytes(self._mac_accumulator)
