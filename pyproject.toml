@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "megapy"
+version = "1.0.0"
+description = "Async MEGA cloud storage client"
+requires-python = ">=3.10"
+dependencies = [
+    "pycryptodome",
+    "aiohttp",
+    "cryptography",
+    "Pillow",
+    "typer",
+    "rich",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["megapy*"]
