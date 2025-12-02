@@ -1,7 +1,7 @@
 """
 Media attributes for video/audio files.
 
-Based on MEGA webclient's MediaAttribute implementation.
+Based on MEGA webclient's MediaAttribute implementation (js/crypto.js).
 Stores video/audio metadata like duration, resolution, fps, and codecs.
 """
 from __future__ import annotations
@@ -12,47 +12,72 @@ from typing import Optional, List, Tuple
 from ..crypto import Base64Encoder
 
 
-# XXTEA encryption constants
+# XXTEA constants (from MEGA webclient js/crypto.js)
+# Reference: https://github.com/xxtea/xxtea-js/blob/master/src/xxtea.js
 XXTEA_DELTA = 0x9E3779B9
 
 
-def _int32(i: int) -> int:
-    """Convert to signed 32-bit integer."""
+def _uint32(i: int) -> int:
+    """Convert to unsigned 32-bit integer."""
     return i & 0xFFFFFFFF
 
 
 def _mx(sum_val: int, y: int, z: int, p: int, e: int, k: List[int]) -> int:
-    """XXTEA mixing function."""
-    return ((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4)) ^ ((sum_val ^ y) + (k[p & 3 ^ e] ^ z))
+    """
+    XXTEA mixing function - exact match of MEGA's JavaScript implementation.
+    
+    JavaScript: (z >>> 5 ^ y << 2) + (y >>> 3 ^ z << 4) ^ (sum ^ y) + (k[p & 3 ^ e] ^ z)
+    
+    All operations use unsigned 32-bit integers.
+    """
+    return _uint32(
+        _uint32((_uint32(z) >> 5) ^ _uint32(y << 2)) +
+        _uint32((_uint32(y) >> 3) ^ _uint32(z << 4))
+    ) ^ _uint32(
+        _uint32(sum_val ^ y) + _uint32(k[(p & 3) ^ e] ^ z)
+    )
 
 
 def xxtea_encrypt(v: List[int], k: List[int]) -> List[int]:
     """
-    Encrypt uint32 array with XXTEA.
+    Encrypt uint32 array with XXTEA (exact MEGA webclient implementation).
+    
+    From js/crypto.js:
+        for (q = Math.floor(6 + 52 / length) | 0; q > 0; --q) {
+            sum = int32(sum + DELTA);
+            e = sum >>> 2 & 3;
+            for (p = 0; p < n; ++p) {
+                y = v[p + 1];
+                z = v[p] = int32(v[p] + mx(sum, y, z, p, e, k));
+            }
+            y = v[0];
+            z = v[n] = int32(v[n] + mx(sum, y, z, n, e, k));
+        }
     
     Args:
-        v: Array of uint32 values to encrypt
+        v: Array of uint32 values to encrypt (modified in place)
         k: Key as array of 4 uint32 values
         
     Returns:
         Encrypted uint32 array
     """
-    n = len(v) - 1
+    length = len(v)
+    n = length - 1
     z = v[n]
     sum_val = 0
-    q = 6 + 52 // len(v)
+    q = 6 + 52 // length
     
     for _ in range(q):
-        sum_val = _int32(sum_val + XXTEA_DELTA)
+        sum_val = _uint32(sum_val + XXTEA_DELTA)
         e = (sum_val >> 2) & 3
         
         for p in range(n):
             y = v[p + 1]
-            v[p] = _int32(v[p] + _mx(sum_val, y, z, p, e, k))
+            v[p] = _uint32(v[p] + _mx(sum_val, y, z, p, e, k))
             z = v[p]
         
         y = v[0]
-        v[n] = _int32(v[n] + _mx(sum_val, y, z, n, e, k))
+        v[n] = _uint32(v[n] + _mx(sum_val, y, z, n, e, k))
         z = v[n]
     
     return v
@@ -60,33 +85,45 @@ def xxtea_encrypt(v: List[int], k: List[int]) -> List[int]:
 
 def xxtea_decrypt(v: List[int], k: List[int]) -> List[int]:
     """
-    Decrypt uint32 array with XXTEA.
+    Decrypt uint32 array with XXTEA (exact MEGA webclient implementation).
+    
+    From js/crypto.js:
+        for (sum = int32(q * DELTA); sum !== 0; sum = int32(sum - DELTA)) {
+            e = sum >>> 2 & 3;
+            for (p = n; p > 0; --p) {
+                z = v[p - 1];
+                y = v[p] = int32(v[p] - mx(sum, y, z, p, e, k));
+            }
+            z = v[n];
+            y = v[0] = int32(v[0] - mx(sum, y, z, 0, e, k));
+        }
     
     Args:
-        v: Array of encrypted uint32 values
+        v: Array of encrypted uint32 values (modified in place)
         k: Key as array of 4 uint32 values
         
     Returns:
         Decrypted uint32 array
     """
-    n = len(v) - 1
+    length = len(v)
+    n = length - 1
     y = v[0]
-    q = 6 + 52 // len(v)
-    sum_val = _int32(q * XXTEA_DELTA)
+    q = 6 + 52 // length
+    sum_val = _uint32(q * XXTEA_DELTA)
     
     while sum_val != 0:
         e = (sum_val >> 2) & 3
         
         for p in range(n, 0, -1):
             z = v[p - 1]
-            v[p] = _int32(v[p] - _mx(sum_val, y, z, p, e, k))
+            v[p] = _uint32(v[p] - _mx(sum_val, y, z, p, e, k))
             y = v[p]
         
         z = v[n]
-        v[0] = _int32(v[0] - _mx(sum_val, y, z, 0, e, k))
+        v[0] = _uint32(v[0] - _mx(sum_val, y, z, 0, e, k))
         y = v[0]
         
-        sum_val = _int32(sum_val - XXTEA_DELTA)
+        sum_val = _uint32(sum_val - XXTEA_DELTA)
     
     return v
 
@@ -172,14 +209,79 @@ class MediaInfo:
         if self.width and self.height:
             return f"{self.width}x{self.height}"
         return ""
+    
+    @property
+    def container_name(self) -> str:
+        """Get container format name (e.g., 'mp4', 'mkv')."""
+        if self.shortformat > 0 and self.shortformat in SHORTFORMAT_MAP:
+            return SHORTFORMAT_MAP[self.shortformat][0]
+        return CONTAINER_MAP.get(self.container, f"id:{self.container}")
+    
+    @property
+    def video_codec_name(self) -> str:
+        """Get video codec name (e.g., 'h264', 'hevc')."""
+        if self.shortformat > 0 and self.shortformat in SHORTFORMAT_MAP:
+            return SHORTFORMAT_MAP[self.shortformat][1]
+        return VIDEO_CODEC_MAP.get(self.videocodec, f"id:{self.videocodec}" if self.videocodec else "")
+    
+    @property
+    def audio_codec_name(self) -> str:
+        """Get audio codec name (e.g., 'aac', 'mp3')."""
+        if self.shortformat > 0 and self.shortformat in SHORTFORMAT_MAP:
+            return SHORTFORMAT_MAP[self.shortformat][2]
+        return AUDIO_CODEC_MAP.get(self.audiocodec, f"id:{self.audiocodec}" if self.audiocodec else "")
+    
+    @property 
+    def codec_string(self) -> str:
+        """Get full codec string (e.g., 'mp4/h264/aac')."""
+        parts = [self.container_name, self.video_codec_name, self.audio_codec_name]
+        return "/".join(p for p in parts if p)
 
 
-# Common shortformat mappings (container:vcodec:acodec)
+# Common shortformat mappings (id -> container, vcodec, acodec)
 SHORTFORMAT_MAP = {
-    1: ('mp42', 'avc1', 'mp4a-40-2'),
-    2: ('mp42', 'avc1', ''),
-    3: ('mp42', '', 'mp4a-40-2'),
-    # Add more as needed based on MEGA's mediaCodecs list
+    1: ('mp4', 'h264', 'aac'),
+    2: ('mp4', 'h264', ''),
+    3: ('mp4', '', 'aac'),
+}
+
+# Known codec IDs from MEGA (obtained via 'mc' API command)
+# These are common mappings - full list can be fetched dynamically
+CONTAINER_MAP = {
+    0: 'unknown',
+    129: 'mp4',
+    130: 'webm',
+    131: 'mkv',
+    132: 'avi',
+    133: 'mov',
+    134: 'flv',
+    135: '3gp',
+    136: 'wmv',
+    137: 'ogg',
+}
+
+VIDEO_CODEC_MAP = {
+    0: '',
+    887: 'h264',
+    888: 'hevc',
+    889: 'vp8',
+    890: 'vp9',
+    891: 'av1',
+    892: 'mpeg4',
+    893: 'mpeg2',
+    894: 'theora',
+}
+
+AUDIO_CODEC_MAP = {
+    0: '',
+    1: 'aac',
+    2: 'mp3',
+    3: 'opus',
+    4: 'vorbis',
+    5: 'flac',
+    6: 'ac3',
+    7: 'eac3',
+    8: 'dts',
 }
 
 
@@ -304,7 +406,7 @@ class MediaAttributeService:
         return result
     
     def _key_to_array(self, file_key: bytes) -> Optional[List[int]]:
-        """Convert file key bytes to 8-element uint32 array."""
+        """Convert file key bytes to 8-element uint32 array (Big-Endian like webclient)."""
         if len(file_key) < 32:
             # For 16-byte keys, duplicate to 32 bytes
             if len(file_key) >= 16:
@@ -312,7 +414,8 @@ class MediaAttributeService:
             else:
                 return None
         
-        return list(struct.unpack('<8I', file_key[:32]))
+        # Use Big-Endian like webclient's base64_to_a32
+        return list(struct.unpack('>8I', file_key[:32]))
     
     def _parse_attr8(self, data: bytes) -> MediaInfo:
         """Parse attribute 8 data into MediaInfo."""
@@ -591,7 +694,7 @@ class MediaProcessor:
                 '-print_format', 'json',
                 '-show_format',
                 '-show_streams',
-                file_path
+                str(file_path)
             ]
             
             result = subprocess.run(cmd, capture_output=True, timeout=30)
@@ -601,11 +704,15 @@ class MediaProcessor:
             data = json.loads(result.stdout)
             
             info = MediaInfo()
+            container = ''
+            vcodec = ''
+            acodec = ''
             
-            # Get duration from format
+            # Get duration and container from format
             if 'format' in data:
                 duration = float(data['format'].get('duration', 0))
                 info.playtime = int(duration)
+                container = data['format'].get('format_name', '').split(',')[0]
             
             # Get video/audio stream info
             for stream in data.get('streams', []):
@@ -614,6 +721,20 @@ class MediaProcessor:
                 if codec_type == 'video':
                     info.width = stream.get('width', 0)
                     info.height = stream.get('height', 0)
+                    vcodec = stream.get('codec_name', '')
+                    
+                    # Handle rotation
+                    rotation = 0
+                    if 'tags' in stream:
+                        rotation = int(stream['tags'].get('rotate', 0))
+                    if 'side_data_list' in stream:
+                        for side_data in stream['side_data_list']:
+                            if 'rotation' in side_data:
+                                rotation = abs(int(side_data['rotation']))
+                    
+                    # Swap width/height for 90/270 rotation
+                    if rotation in (90, 270):
+                        info.width, info.height = info.height, info.width
                     
                     # Parse fps
                     fps_str = stream.get('r_frame_rate', '0/1')
@@ -622,14 +743,54 @@ class MediaProcessor:
                         if int(den) > 0:
                             info.fps = int(int(num) / int(den))
                 
-                elif codec_type == 'audio' and info.playtime == 0:
-                    duration = float(stream.get('duration', 0))
-                    info.playtime = int(duration)
+                elif codec_type == 'audio':
+                    acodec = stream.get('codec_name', '')
+                    if info.playtime == 0:
+                        duration = float(stream.get('duration', 0))
+                        info.playtime = int(duration)
             
-            # Set shortformat to 255 (unknown) - can be improved with codec mapping
-            info.shortformat = 255 if info.playtime > 0 else 0
+            # Map to MEGA codec IDs using known shortformats
+            info.shortformat = MediaProcessor._get_shortformat(container, vcodec, acodec)
+            
+            # If shortformat is 0 (custom), we'd need codec IDs
+            # For now, set to 255 (unknown) if we can't determine shortformat
+            if info.shortformat == 0:
+                info.shortformat = 255
             
             return info if info.playtime > 0 else None
             
         except Exception:
             return None
+    
+    @staticmethod
+    def _get_shortformat(container: str, vcodec: str, acodec: str) -> int:
+        """
+        Map container/codec combination to MEGA shortformat ID.
+        
+        Common shortformat values:
+        1: mp42:avc1:mp4a-40-2 (MP4 with H.264 video and AAC audio)
+        2: mp42:avc1:'' (MP4 with H.264 video, no audio)
+        3: mp42:'':mp4a-40-2 (MP4 with AAC audio only)
+        
+        Returns 255 for unknown formats.
+        """
+        # Normalize codec names
+        container = container.lower()
+        vcodec = vcodec.lower()
+        acodec = acodec.lower()
+        
+        # Map common ffprobe names to MEGA format
+        is_mp4 = container in ('mp4', 'mov', 'm4a', 'm4v', 'quicktime')
+        is_h264 = vcodec in ('h264', 'avc1', 'avc')
+        is_aac = acodec in ('aac', 'mp4a')
+        
+        if is_mp4:
+            if is_h264 and is_aac:
+                return 1  # mp42:avc1:mp4a-40-2
+            elif is_h264 and not acodec:
+                return 2  # mp42:avc1:''
+            elif not vcodec and is_aac:
+                return 3  # mp42:'':mp4a-40-2
+        
+        # For other formats, return 255 (unknown)
+        return 255

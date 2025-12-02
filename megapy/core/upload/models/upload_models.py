@@ -161,11 +161,12 @@ class UploadConfig:
         encryption_key: Optional custom encryption key
         max_concurrent_uploads: Maximum concurrent chunk uploads
         timeout: Request timeout in seconds
-        thumbnail: Optional thumbnail image bytes (120x120 JPEG 70%)
-        preview: Optional preview image bytes (max 1000px JPEG 75%)
+        thumbnail: Optional thumbnail image bytes (240x240 JPEG 80%)
+        preview: Optional preview image bytes (max 1024px JPEG 85%)
         auto_thumbnail: Auto-generate thumbnail for media files
         auto_preview: Auto-generate preview for media files
         custom_attributes: Custom attributes for 'e' object
+        media_info: Optional media metadata for video/audio files
     """
     file_path: Path
     target_folder_id: str
@@ -178,6 +179,7 @@ class UploadConfig:
     auto_thumbnail: bool = True
     auto_preview: bool = True
     custom_attributes: Optional[CustomAttributes] = None
+    media_info: Optional[Any] = None  # MediaInfo from core.attributes
     
     def __post_init__(self):
         """Validate and normalize config."""

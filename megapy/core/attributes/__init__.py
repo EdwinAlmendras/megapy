@@ -24,6 +24,9 @@ from .media import (
     MediaResult,
     xxtea_encrypt,
     xxtea_decrypt,
+    _xxkey,
+    _bytes_to_uint32_le,
+    _uint32_to_bytes_le,
 )
 
 __all__ = [

@@ -6,15 +6,15 @@
 - [x] MediaResult dataclass for thumbnail/preview processing results
 - [x] Unit tests for MediaProcessor, ThumbnailService, PreviewService (54 tests)
 - [x] Unit tests for file attribute upload (URL endpoints, encryption, format)
-
-## Pending Refactoring
-- [ ] Refactorize crypto module
-- [ ] Refactorize api module  
-- [ ] Refactorize auth module
-- [ ] Refactorize storage files
+- [x] Video/Media Attributes (type 8*/9*) - Auto-extraction and upload via pfa command
+- [x] MediaProcessor.extract_metadata() - Improved to detect shortformat (MP4/H.264/AAC)
+- [x] Documentation for video attributes in docs/video_attributes.md
+- [x] Unit tests for video attributes upload (25 tests)
 
 ## Future Improvements
-- [ ] Add support for more video codecs in MediaInfo
+- [x] Add support for more video codecs in MediaInfo (HEVC, VP9, AV1)
+- [x] Retrieve and cache MEGA's codec list via 'mc' API command
+- [ ] Implement generate preview grid 3x3 or 4x4 with one option create_preview_grid option
+
 - [ ] Improve video thumbnail extraction (better frame selection)
-- [ ] Add batch upload with parallel processing
-- [ ] Add download progress for file attributes (thumbnails/previews)
+

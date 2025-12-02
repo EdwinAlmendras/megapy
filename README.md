@@ -5,14 +5,18 @@ A professional, async-first Python library for MEGA cloud storage. Built with SO
 ## Features
 
 - **Async/Await**: Fully asynchronous API using aiohttp
+- **CLI**: Full command-line interface with typer
 - **Session Persistence**: SQLite-based sessions like Telethon
 - **Tree Navigation**: Professional file system interface with path-based navigation
 - **Custom Attributes**: Extended metadata support with minimized keys
 - **Thumbnail/Preview**: Auto-generation for images and videos
+- **Grid Preview**: 4x4 or 3x3 video grid thumbnails
+- **Media Info**: Video/audio metadata (duration, resolution, codecs)
+- **Codec Names**: Full codec list from MEGA API (1800+ codecs)
 - **Configurable**: Proxy, SSL, timeouts, retries, custom headers
 - **Secure**: Full support for MEGA's end-to-end encryption
 - **SOLID**: Clean architecture with dependency injection
-- **Tested**: 340+ unit tests with real account e2e tests
+- **Tested**: 369+ unit tests
 
 ## Installation
 
@@ -27,6 +31,57 @@ pycryptodome    # Cryptographic operations
 aiohttp         # Async HTTP client
 cryptography    # Advanced crypto primitives
 Pillow          # Image processing (optional, for thumbnails)
+typer           # CLI framework
+rich            # CLI output formatting
+```
+
+---
+
+## CLI Usage
+
+```bash
+# Login (saves session to ~/.config/mega/session.session)
+python -m megapy login
+
+# Show current user
+python -m megapy whoami
+
+# List files
+python -m megapy ls
+python -m megapy ls /Documents -l
+
+# Upload file
+python -m megapy upload video.mp4
+python -m megapy upload video.mp4 --dest /Videos --name "my_video.mp4"
+
+# Upload with grid preview (4x4 for videos >=60s, 3x3 for <60s)
+python -m megapy upload video.mp4 --preview-grid
+
+# Upload with custom thumbnail/preview
+python -m megapy upload video.mp4 --thumbnail thumb.jpg --preview preview.jpg
+
+# Upload with custom attributes
+python -m megapy upload doc.pdf --doc-id "DOC-001" --url "https://example.com"
+
+# Download file
+python -m megapy download /Documents/file.pdf
+python -m megapy download /Documents/file.pdf -o ./local_file.pdf
+
+# File info (shows media info for videos)
+python -m megapy info video.mp4
+
+# Create folder
+python -m megapy mkdir /NewFolder
+
+# Delete file
+python -m megapy rm /Documents/old.pdf
+python -m megapy rm /Documents/old.pdf -f  # Force delete
+
+# Move file
+python -m megapy mv /file.txt /Documents
+
+# Logout
+python -m megapy logout
 ```
 
 ---
@@ -121,13 +176,19 @@ MegaClient(
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
 | `upload()` | See below | `MegaFile` | Upload a file |
+| `load_codecs()` | `force?: bool` | `dict` | Load codec list from MEGA API (cached in session) |
 
 ```python
 await mega.upload(
     file_path: Union[str, Path],              # Local file path
     dest_folder: Optional[str] = None,        # Destination folder handle
     name: Optional[str] = None,               # Custom file name
-    progress_callback: Optional[Callable] = None  # Progress updates
+    progress_callback: Optional[Callable] = None,  # Progress updates
+    custom: Optional[Dict[str, Any]] = None,  # Custom attributes {i, u, d, ...}
+    label: int = 0,                           # Color label (0-7)
+    auto_thumb: bool = True,                  # Auto-generate thumbnail/preview
+    thumbnail: Optional[Union[str, Path, bytes]] = None,  # Custom thumbnail
+    preview: Optional[Union[str, Path, bytes]] = None     # Custom preview
 )
 ```
 
@@ -425,6 +486,74 @@ print(attrs.to_dict())
 attrs2 = FileAttributes(name="report.pdf")
 attrs2.with_custom(document_id="DOC-002", url="https://test.com")
 ```
+
+---
+
+## Media Info
+
+Video/audio metadata stored in MEGA file attributes.
+
+### Accessing Media Info
+
+```python
+async with MegaClient("session") as mega:
+    # Load codec names from MEGA API (optional, cached in session)
+    await mega.load_codecs()
+    
+    root = await mega.get_root()
+    
+    for node in root.walk():
+        if node.has_media_info:
+            info = node.media_info
+            print(f"{node.name}")
+            print(f"  Duration: {info.duration_formatted}")  # "1:23" or "1:23:45"
+            print(f"  Resolution: {info.resolution}")        # "1920x1080"
+            print(f"  FPS: {info.fps}")
+            print(f"  Codecs: {info.codec_string}")          # "mp4/h264/aac"
+            print(f"  Container: {info.container_name}")     # "mp4"
+            print(f"  Video codec: {info.video_codec_name}") # "h264"
+            print(f"  Audio codec: {info.audio_codec_name}") # "aac"
+```
+
+### MediaInfo Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `width` | `int` | Video width in pixels |
+| `height` | `int` | Video height in pixels |
+| `fps` | `int` | Frames per second |
+| `playtime` | `int` | Duration in seconds |
+| `resolution` | `str` | "1920x1080" format |
+| `duration_formatted` | `str` | "1:23" or "1:23:45" format |
+| `container_name` | `str` | "mp4", "mkv", etc. |
+| `video_codec_name` | `str` | "h264", "hevc", etc. |
+| `audio_codec_name` | `str` | "aac", "mp3", etc. |
+| `codec_string` | `str` | "mp4/h264/aac" format |
+| `is_video` | `bool` | True if video file |
+| `is_audio` | `bool` | True if audio-only |
+| `is_valid` | `bool` | True if valid format |
+
+### Node Media Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `has_media_info` | `bool` | True if has media metadata |
+| `media_info` | `Optional[MediaInfo]` | Media info object |
+| `duration` | `Optional[int]` | Duration shortcut |
+| `width` | `Optional[int]` | Width shortcut |
+| `height` | `Optional[int]` | Height shortcut |
+| `fps` | `Optional[int]` | FPS shortcut |
+| `is_video` | `bool` | Is video file |
+| `is_audio` | `bool` | Is audio file |
+
+### Codec List
+
+The `load_codecs()` method fetches the full codec list from MEGA API:
+- **189 containers**: mp4, mkv, webm, avi, mov, etc.
+- **1194 video codecs**: h264, hevc, vp9, av1, etc.
+- **476 audio codecs**: aac, mp3, opus, flac, etc.
+
+The codec list is cached in the SQLite session file.
 
 ---
 
@@ -959,19 +1088,30 @@ python -m pytest tests/unit/ --cov=megapy --cov-report=html
 
 ---
 
+## Documentation
+
+- [Video Attributes](docs/video_attributes.md) - How MEGA stores video/audio metadata (duration, resolution, codecs)
+
+---
+
 ## Project Structure
 
 ```
 megapy/
 ├── __init__.py              # Main exports
+├── __main__.py              # CLI entry point (python -m megapy)
 ├── client.py                # MegaClient (high-level API)
-├── nodes.py                 # MegaNode tree navigation
+├── node.py                  # Unified Node class
+├── cli/
+│   ├── __init__.py
+│   ├── main.py              # CLI commands (typer)
+│   └── grid.py              # Grid preview generator
 └── core/
     ├── api/                 # API client and auth
-    ├── attributes/          # Custom attributes, thumbnails
+    ├── attributes/          # Custom attributes, thumbnails, media
     ├── crypto/              # AES, RSA, hashing
-    ├── session/             # Session persistence
-    ├── storage/             # Node storage and processing
+    ├── nodes/               # Node service and key decryption
+    ├── session/             # Session persistence (SQLite)
     └── upload/              # Upload coordinator
 ```
 

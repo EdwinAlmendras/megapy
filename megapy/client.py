@@ -1,24 +1,11 @@
 """
 MegaClient - High-level async client for MEGA.
 
-This is the main entry point for using megapy.
-Provides a simple, intuitive API for all MEGA operations.
-
-Supports session persistence similar to Telethon.
-
-Example with session:
-    >>> client = MegaClient("my_account")
-    >>> await client.start()
-    >>> 
-    >>> # Tree navigation
-    >>> root = await client.get_root()
-    >>> docs = root / "Documents"
-    >>> for file in docs:
-    ...     print(file.name)
-
-Example with credentials:
-    >>> async with MegaClient("email@example.com", "password") as mega:
-    ...     files = await mega.list_files()
+Example:
+    >>> async with MegaClient("session") as mega:
+    ...     root = await mega.get_root()
+    ...     for node in root:
+    ...         print(node)
 """
 import asyncio
 import logging
@@ -41,34 +28,12 @@ from .core.upload import UploadCoordinator, UploadConfig, UploadResult, UploadPr
 from .core.upload.models import FileAttributes
 from .core.crypto import Base64Encoder, AESCrypto
 from .core.session import SessionStorage, SessionData, SQLiteSession, MemorySession
-from .nodes import MegaNode, MegaNodeBuilder
+from .core.nodes import NodeService
+from .node import Node
 
-
-@dataclass
-class MegaFile:
-    """Represents a file or folder in MEGA."""
-    handle: str
-    name: str
-    size: int = 0
-    is_folder: bool = False
-    parent_handle: Optional[str] = None
-    key: Optional[bytes] = None
-    
-    _raw: Dict[str, Any] = field(default_factory=dict, repr=False)
-    
-    def __str__(self) -> str:
-        type_str = "[DIR]" if self.is_folder else "[FILE]"
-        size_str = f" ({self._format_size()})" if not self.is_folder else ""
-        return f"{type_str} {self.name}{size_str}"
-    
-    def _format_size(self) -> str:
-        """Format size in human readable format."""
-        size = self.size
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} PB"
+# Backward compatibility
+MegaFile = Node
+MegaNode = Node
 
 
 @dataclass  
@@ -111,6 +76,8 @@ class MegaClient:
         >>> client = MegaClient("session", config=config)
         >>> await client.start()
     """
+    
+    _codecs_cache: Optional[dict] = None  # Class-level cache for codec list
     
     def __init__(
         self,
@@ -160,15 +127,10 @@ class MegaClient:
         self._auth: Optional[AsyncAuthService] = None
         self._auth_result: Optional[AuthResult] = None
         
-        # Cached data
-        self._nodes: Dict[str, MegaFile] = {}
-        self._root_id: Optional[str] = None
+        # State
         self._master_key: Optional[bytes] = None
-        
-        # Tree navigation
-        self._root_node: Optional[MegaNode] = None
-        self._current_node: Optional[MegaNode] = None
-        self._node_map: Dict[str, MegaNode] = {}
+        self._node_service: Optional[NodeService] = None
+        self._current_node: Optional[Node] = None
     
     # =========================================================================
     # Configuration helpers
@@ -371,8 +333,8 @@ class MegaClient:
         self._session.delete()
         self._auth_result = None
         self._master_key = None
-        self._nodes.clear()
-        self._root_id = None
+        self._node_service = None
+        self._current_node = None
         
         await self.close()
     
@@ -440,154 +402,142 @@ class MegaClient:
         return None
     
     # =========================================================================
-    # File listing
+    # Properties (Clean API)
     # =========================================================================
     
-    async def list_files(
-        self,
-        folder: Optional[str] = None,
-        refresh: bool = False
-    ) -> List[MegaFile]:
-        """
-        List files in a folder.
-        
-        Args:
-            folder: Folder handle or path. None for root.
-            refresh: Force refresh from server
-            
-        Returns:
-            List of MegaFile objects
-        """
-        self._ensure_logged_in()
-        
-        if refresh or not self._nodes:
-            await self._load_nodes()
-        
-        parent_id = folder or self._root_id
-        
-        return [
-            f for f in self._nodes.values()
-            if f.parent_handle == parent_id
-        ]
+    @property
+    def root(self) -> Optional[Node]:
+        """Root node (call load() first)."""
+        return self._node_service.root if self._node_service else None
     
-    async def get_all_files(self, refresh: bool = False) -> List[MegaFile]:
+    async def load_codecs(self, force: bool = False) -> dict:
         """
-        Get all files (flat list).
+        Load media codec list from MEGA API (cached in session).
         
         Args:
-            refresh: Force refresh from server
+            force: Force reload from API even if cached
             
         Returns:
-            List of all MegaFile objects
+            Dict with container, video, audio codec mappings
         """
+        # Check memory cache first
+        if MegaClient._codecs_cache and not force:
+            return MegaClient._codecs_cache
+        
+        # Check session cache (SQLite)
+        if not force and hasattr(self._session, 'get_cache'):
+            cached = self._session.get_cache('codecs')
+            if cached:
+                MegaClient._codecs_cache = cached
+                self._apply_codecs(cached)
+                return cached
+        
         self._ensure_logged_in()
         
-        if refresh or not self._nodes:
-            await self._load_nodes()
+        codecs = await self._api.get_media_codecs()
         
-        return list(self._nodes.values())
+        if codecs:
+            MegaClient._codecs_cache = codecs
+            self._apply_codecs(codecs)
+            
+            # Save to session cache
+            if hasattr(self._session, 'set_cache'):
+                self._session.set_cache('codecs', codecs)
+        
+        return codecs
     
-    async def find(self, name: str) -> Optional[MegaFile]:
-        """
-        Find a file by name.
-        
-        Args:
-            name: File name to search for
-            
-        Returns:
-            MegaFile if found, None otherwise
-        """
-        self._ensure_logged_in()
-        
-        if not self._nodes:
-            await self._load_nodes()
-        
-        for f in self._nodes.values():
-            if f.name == name:
-                return f
-        return None
+    def _apply_codecs(self, codecs: dict) -> None:
+        """Apply codec mappings to global maps."""
+        from .core.attributes.media import (
+            CONTAINER_MAP, VIDEO_CODEC_MAP, AUDIO_CODEC_MAP, SHORTFORMAT_MAP
+        )
+        CONTAINER_MAP.update(codecs.get('container', {}))
+        VIDEO_CODEC_MAP.update(codecs.get('video', {}))
+        AUDIO_CODEC_MAP.update(codecs.get('audio', {}))
+        SHORTFORMAT_MAP.update(codecs.get('shortformat', {}))
+    
+    @property
+    def files(self) -> List[Node]:
+        """All files (call load() first)."""
+        return self._node_service.all_files() if self._node_service else []
+    
+    @property
+    def folders(self) -> List[Node]:
+        """All folders (call load() first)."""
+        return self._node_service.all_folders() if self._node_service else []
     
     # =========================================================================
-    # Tree Navigation (Professional File System Interface)
+    # Core Operations
     # =========================================================================
     
-    async def get_root(self, refresh: bool = False) -> MegaNode:
-        """
-        Get the root node (Cloud Drive).
-        
-        Args:
-            refresh: Force refresh from server
-            
-        Returns:
-            Root MegaNode
-            
-        Example:
-            >>> root = await mega.get_root()
-            >>> for item in root:
-            ...     print(item.name)
-        """
+    async def load(self, refresh: bool = False) -> Node:
+        """Load nodes from server. Returns root node."""
         self._ensure_logged_in()
         
-        if refresh or self._root_node is None:
-            await self._load_tree()
+        if refresh or self._node_service is None:
+            await self._load_nodes()
         
-        return self._root_node
+        return self._node_service.root
     
-    async def get(self, path: str, refresh: bool = False) -> Optional[MegaNode]:
-        """
-        Get node by path.
-        
-        Args:
-            path: Path from root (e.g., "/Documents/report.pdf")
-            refresh: Force refresh from server
-            
-        Returns:
-            MegaNode or None if not found
-            
-        Example:
-            >>> docs = await mega.get("/Documents")
-            >>> file = await mega.get("/Documents/report.pdf")
-        """
-        self._ensure_logged_in()
-        
-        if refresh or self._root_node is None:
-            await self._load_tree()
-        
-        if not path or path == "/":
-            return self._root_node
-        
-        # Remove leading slash and split
-        path = path.lstrip("/")
-        return self._root_node.find(path)
+    async def get_root(self, refresh: bool = False) -> Node:
+        """Get root node (Cloud Drive)."""
+        return await self.load(refresh)
     
-    async def cd(self, path: str) -> MegaNode:
-        """
-        Change current directory.
-        
-        Args:
-            path: Path to navigate to (absolute or relative)
-            
-        Returns:
-            New current node
-            
-        Example:
-            >>> await mega.cd("/Documents")
-            >>> await mega.cd("Reports")  # Relative
-            >>> await mega.cd("..")       # Parent
-        """
+    async def get(self, path: str, refresh: bool = False) -> Optional[Node]:
+        """Get node by path (e.g., '/Documents/file.pdf')."""
         self._ensure_logged_in()
         
-        if self._root_node is None:
-            await self._load_tree()
+        if refresh or self._node_service is None:
+            await self._load_nodes()
         
+        return self._node_service.find_by_path(path)
+    
+    async def find(self, name: str) -> Optional[Node]:
+        """Find first node matching name."""
+        self._ensure_logged_in()
+        
+        if self._node_service is None:
+            await self._load_nodes()
+        
+        return self._node_service.find_by_name(name)
+    
+    # =========================================================================
+    # Backward Compatibility
+    # =========================================================================
+    
+    async def list_files(self, folder: Optional[str] = None, refresh: bool = False) -> List[Node]:
+        """List files in folder (backward compat)."""
+        self._ensure_logged_in()
+        
+        if refresh or self._node_service is None:
+            await self._load_nodes()
+        
+        if folder:
+            node = self._node_service.get(folder)
+            return node.files if node else []
+        
+        return self._node_service.root.files if self._node_service.root else []
+    
+    async def get_all_files(self, refresh: bool = False) -> List[Node]:
+        """Get all files flat (backward compat)."""
+        await self.load(refresh)
+        return list(self._node_service.nodes.values())
+    
+    async def cd(self, path: str) -> Node:
+        """Change current directory."""
+        self._ensure_logged_in()
+        
+        if self._node_service is None:
+            await self._load_nodes()
+        
+        root = self._node_service.root
         if self._current_node is None:
-            self._current_node = self._root_node
+            self._current_node = root
         
         if path == "/":
-            self._current_node = self._root_node
+            self._current_node = root
         elif path.startswith("/"):
-            # Absolute path
-            node = self._root_node.find(path.lstrip("/"))
+            node = self._node_service.find_by_path(path)
             if node is None:
                 raise FileNotFoundError(f"Path not found: {path}")
             self._current_node = node
@@ -601,189 +551,26 @@ class MegaClient:
         return self._current_node
     
     def pwd(self) -> str:
-        """
-        Get current working directory path.
-        
-        Returns:
-            Current path string
-            
-        Example:
-            >>> print(mega.pwd())
-            /Documents/Reports
-        """
-        if self._current_node is None:
-            return "/"
-        return self._current_node.path
+        """Get current working directory path."""
+        return self._current_node.path if self._current_node else "/"
     
-    async def ls(
-        self,
-        path: Optional[str] = None,
-        show_hidden: bool = False
-    ) -> List[MegaNode]:
-        """
-        List directory contents.
-        
-        Args:
-            path: Path to list (None for current directory)
-            show_hidden: Include hidden files
-            
-        Returns:
-            List of child nodes
-            
-        Example:
-            >>> files = await mega.ls()
-            >>> files = await mega.ls("/Documents")
-        """
-        self._ensure_logged_in()
-        
-        if self._root_node is None:
-            await self._load_tree()
+    async def ls(self, path: Optional[str] = None) -> List[Node]:
+        """List directory contents."""
+        await self.load()
         
         if path:
             node = await self.get(path)
         else:
-            node = self._current_node or self._root_node
+            node = self._current_node or self._node_service.root
         
         if node is None:
             raise FileNotFoundError(f"Path not found: {path}")
         
-        return node.ls(show_hidden=show_hidden)
+        return list(node.children)
     
-    async def tree(self, path: Optional[str] = None, max_depth: int = 3) -> str:
-        """
-        Get tree representation of directory structure.
-        
-        Args:
-            path: Starting path (None for current/root)
-            max_depth: Maximum depth to display
-            
-        Returns:
-            Tree string
-            
-        Example:
-            >>> print(await mega.tree())
-            [+] Cloud Drive
-              [+] Documents
-                [-] report.pdf
-              [+] Photos
-        """
-        self._ensure_logged_in()
-        
-        if self._root_node is None:
-            await self._load_tree()
-        
-        if path:
-            node = await self.get(path)
-        else:
-            node = self._current_node or self._root_node
-        
-        if node is None:
-            raise FileNotFoundError(f"Path not found: {path}")
-        
-        return node.tree(max_depth=max_depth)
-    
-    async def glob(self, pattern: str, path: Optional[str] = None) -> List[MegaNode]:
-        """
-        Find files matching glob pattern.
-        
-        Args:
-            pattern: Glob pattern (e.g., "*.pdf", "**/*.txt")
-            path: Starting path
-            
-        Returns:
-            List of matching nodes
-            
-        Example:
-            >>> pdfs = await mega.glob("*.pdf")
-            >>> all_docs = await mega.glob("Documents/**/*.docx")
-        """
-        self._ensure_logged_in()
-        
-        if self._root_node is None:
-            await self._load_tree()
-        
-        if path:
-            node = await self.get(path)
-        else:
-            node = self._root_node
-        
-        if node is None:
-            return []
-        
-        return node.glob(pattern)
-    
-    async def walk(
-        self,
-        path: Optional[str] = None
-    ):
-        """
-        Walk the directory tree like os.walk().
-        
-        Args:
-            path: Starting path
-            
-        Yields:
-            (folder, subfolders, files) tuples
-            
-        Example:
-            >>> async for folder, subfolders, files in mega.walk():
-            ...     print(f"{folder.path}: {len(files)} files")
-        """
-        self._ensure_logged_in()
-        
-        if self._root_node is None:
-            await self._load_tree()
-        
-        if path:
-            node = await self.get(path)
-        else:
-            node = self._root_node
-        
-        if node is None:
-            return
-        
-        for item in node.walk():
-            yield item
-    
-    def get_node(self, handle: str) -> Optional[MegaNode]:
-        """
-        Get node by handle.
-        
-        Args:
-            handle: Node handle
-            
-        Returns:
-            MegaNode or None
-        """
-        return self._node_map.get(handle)
-    
-    async def _load_tree(self) -> None:
-        """Load file tree from server."""
-        response = await self._api.get_files()
-        nodes_data = response.get('f', [])
-        
-        # Build tree
-        self._root_node = MegaNodeBuilder.build_tree(
-            nodes_data,
-            self._master_key,
-            self
-        )
-        
-        # Set current to root
-        if self._current_node is None:
-            self._current_node = self._root_node
-        
-        # Build node map
-        self._node_map.clear()
-        if self._root_node:
-            self._build_node_map(self._root_node)
-            self._root_id = self._root_node.handle
-    
-    def _build_node_map(self, node: MegaNode) -> None:
-        """Recursively build node handle map."""
-        self._node_map[node.handle] = node
-        for child in node.children:
-            self._build_node_map(child)
+    def get_node(self, handle: str) -> Optional[Node]:
+        """Get node by handle."""
+        return self._node_service.get(handle) if self._node_service else None
     
     # =========================================================================
     # Upload
@@ -797,7 +584,9 @@ class MegaClient:
         progress_callback: Optional[Callable[[UploadProgress], None]] = None,
         custom: Optional[Dict[str, Any]] = None,
         label: int = 0,
-        auto_thumb: bool = True
+        auto_thumb: bool = True,
+        thumbnail: Optional[Union[str, Path, bytes]] = None,
+        preview: Optional[Union[str, Path, bytes]] = None
     ) -> MegaFile:
         """
         Upload a file to MEGA.
@@ -810,6 +599,8 @@ class MegaClient:
             custom: Custom attributes dict. Keys: i=document_id, u=url, d=date, or any 1-2 char key
             label: Color label (0-7: none, red, orange, yellow, green, blue, purple, grey)
             auto_thumb: Auto-generate thumbnail/preview for images/videos
+            thumbnail: Custom thumbnail (path or bytes). Overrides auto_thumb.
+            preview: Custom preview (path or bytes). Overrides auto_thumb.
             
         Returns:
             MegaFile representing the uploaded file
@@ -827,6 +618,9 @@ class MegaClient:
             
             # Image with auto thumbnail
             await mega.upload("photo.jpg")  # auto-generates thumb & preview
+            
+            # Custom thumbnail
+            await mega.upload("video.mp4", thumbnail="custom_thumb.jpg")
         """
         self._ensure_logged_in()
         
@@ -834,10 +628,10 @@ class MegaClient:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         
-        if not self._root_id:
+        if self._node_service is None:
             await self._load_nodes()
         
-        target_id = dest_folder or self._root_id
+        target_id = dest_folder or self._node_service.root_handle
         
         # Build custom attributes if provided
         custom_attrs = None
@@ -860,21 +654,57 @@ class MegaClient:
             custom=custom_attrs
         )
         
-        # Auto-generate thumbnail and preview for media
-        thumbnail = None
-        preview = None
-        if auto_thumb:
+        # Handle thumbnail/preview - custom or auto-generated
+        thumb_data = None
+        preview_data = None
+        media_info = None
+        
+        # Load and resize custom thumbnail if provided
+        if thumbnail is not None:
+            try:
+                from .core.attributes import ThumbnailService
+                thumb_gen = ThumbnailService()
+                # Convert to Path if string
+                thumb_source = Path(thumbnail) if isinstance(thumbnail, str) else thumbnail
+                thumb_data = thumb_gen.generate(thumb_source)
+            except Exception as e:
+                self._logger.warning(f"Failed to generate custom thumbnail: {e}")
+        
+        # Load and resize custom preview if provided
+        if preview is not None:
+            try:
+                from .core.attributes import PreviewService
+                preview_gen = PreviewService()
+                # Convert to Path if string
+                preview_source = Path(preview) if isinstance(preview, str) else preview
+                preview_data = preview_gen.generate(preview_source)
+            except Exception as e:
+                self._logger.warning(f"Failed to generate custom preview: {e}")
+        
+        # Auto-generate thumbnails if not provided and auto_thumb is True
+        if auto_thumb and (thumb_data is None or preview_data is None):
             try:
                 from .core.attributes import MediaProcessor
                 processor = MediaProcessor()
                 if processor.is_media(path):
                     result = processor.process(path)
-                    thumbnail = result.thumbnail
-                    preview = result.preview
+                    if thumb_data is None:
+                        thumb_data = result.thumbnail
+                    if preview_data is None:
+                        preview_data = result.preview
             except ImportError:
                 pass  # Pillow not installed
             except Exception:
                 pass  # Silently ignore media processing errors
+        
+        # Always extract media attributes for videos (independent of auto_thumb)
+        try:
+            from .core.attributes import MediaProcessor
+            processor = MediaProcessor()
+            if processor.is_video(path):
+                media_info = processor.extract_metadata(path)
+        except Exception:
+            pass
         
         coordinator = UploadCoordinator(
             api_client=self._api,
@@ -886,24 +716,28 @@ class MegaClient:
             file_path=path,
             target_folder_id=target_id,
             attributes=attrs,
-            thumbnail=thumbnail,
-            preview=preview
+            thumbnail=thumb_data,
+            preview=preview_data,
+            media_info=media_info
         )
         
         result = await coordinator.upload(config)
         
-        mega_file = MegaFile(
+        node = Node(
             handle=result.node_handle,
             name=name or path.name,
             size=result.file_size,
             is_folder=False,
             parent_handle=target_id,
-            key=result.file_key
+            key=result.file_key,
+            _client=self
         )
         
-        self._nodes[result.node_handle] = mega_file
+        # Add to node service cache
+        if self._node_service:
+            self._node_service.nodes[result.node_handle] = node
         
-        return mega_file
+        return node
     
     # =========================================================================
     # Download
@@ -1113,7 +947,8 @@ class MegaClient:
             raise FileNotFoundError(f"File not found: {file}")
         
         await self._api.delete_node(mega_file.handle)
-        self._nodes.pop(mega_file.handle, None)
+        if self._node_service:
+            self._node_service.nodes.pop(mega_file.handle, None)
         
         return True
     
@@ -1176,18 +1011,18 @@ class MegaClient:
         self,
         name: str,
         parent: Optional[Union[str, MegaFile]] = None
-    ) -> MegaFile:
+    ) -> Node:
         """Create a new folder."""
         self._ensure_logged_in()
         
-        if not self._root_id:
+        if self._node_service is None:
             await self._load_nodes()
         
-        parent_id = self._root_id
+        parent_id = self._node_service.root_handle
         if parent:
-            parent_file = await self._resolve_file(parent)
-            if parent_file:
-                parent_id = parent_file.handle
+            parent_node = await self._resolve_file(parent)
+            if parent_node:
+                parent_id = parent_node.handle
         
         import os
         import json
@@ -1218,15 +1053,17 @@ class MegaClient:
         })
         
         if 'f' in result and len(result['f']) > 0:
-            node = result['f'][0]
-            mega_file = MegaFile(
-                handle=node['h'],
+            data = result['f'][0]
+            node = Node(
+                handle=data['h'],
                 name=name,
                 is_folder=True,
-                parent_handle=parent_id
+                parent_handle=parent_id,
+                _client=self
             )
-            self._nodes[node['h']] = mega_file
-            return mega_file
+            if self._node_service:
+                self._node_service.nodes[data['h']] = node
+            return node
         
         raise ValueError("Failed to create folder")
     
@@ -1240,104 +1077,21 @@ class MegaClient:
             raise RuntimeError("Not logged in. Call start() or use 'async with' first.")
     
     async def _load_nodes(self):
-        """Load all nodes from server."""
+        """Load all nodes from server using NodeService."""
         response = await self._api.get_files()
-        nodes = response.get('f', [])
-        
-        encoder = Base64Encoder()
-        
-        for node in nodes:
-            node_type = node.get('t', 0)
-            handle = node.get('h', '')
-            
-            if node_type in (3, 4):
-                continue
-            
-            if node_type == 2:
-                self._root_id = handle
-                self._nodes[handle] = MegaFile(
-                    handle=handle,
-                    name="Cloud Drive",
-                    is_folder=True,
-                    _raw=node
-                )
-                continue
-            
-            name = self._decrypt_name(node, encoder)
-            
-            self._nodes[handle] = MegaFile(
-                handle=handle,
-                name=name,
-                size=node.get('s', 0),
-                is_folder=(node_type == 1),
-                parent_handle=node.get('p'),
-                key=self._decrypt_key(node, encoder),
-                _raw=node
-            )
+        self._node_service = NodeService(self._master_key, self)
+        self._node_service.load(response)
     
-    def _decrypt_name(self, node: Dict, encoder: Base64Encoder) -> str:
-        """Decrypt node name from attributes."""
-        try:
-            attrs = node.get('a', '')
-            key_str = node.get('k', '')
-            
-            if not attrs or not key_str:
-                return node.get('h', 'Unknown')
-            
-            node_key = self._decrypt_key(node, encoder)
-            if not node_key:
-                return node.get('h', 'Unknown')
-            
-            from Crypto.Cipher import AES
-            
-            attrs_bytes = encoder.decode(attrs)
-            cipher = AES.new(node_key[:16], AES.MODE_CBC, iv=b'\x00' * 16)
-            decrypted = cipher.decrypt(attrs_bytes)
-            
-            if decrypted.startswith(b'MEGA'):
-                import json
-                json_str = decrypted[4:].rstrip(b'\x00').decode('utf-8', errors='ignore')
-                attrs_dict = json.loads(json_str)
-                return attrs_dict.get('n', node.get('h', 'Unknown'))
-            
-            return node.get('h', 'Unknown')
-            
-        except Exception:
-            return node.get('h', 'Unknown')
-    
-    def _decrypt_key(self, node: Dict, encoder: Base64Encoder) -> Optional[bytes]:
-        """Decrypt node key."""
-        try:
-            key_str = node.get('k', '')
-            if not key_str or ':' not in key_str:
-                return None
-            
-            _, encrypted = key_str.split(':', 1)
-            encrypted_key = encoder.decode(encrypted)
-            
-            from Crypto.Cipher import AES
-            cipher = AES.new(self._master_key, AES.MODE_ECB)
-            
-            if len(encrypted_key) == 32:
-                decrypted = cipher.decrypt(encrypted_key)
-                return decrypted
-            elif len(encrypted_key) == 16:
-                return cipher.decrypt(encrypted_key)
-            
-            return None
-            
-        except Exception:
-            return None
-    
-    async def _resolve_file(self, file: Union[str, MegaFile]) -> Optional[MegaFile]:
-        """Resolve file argument to MegaFile."""
-        if isinstance(file, MegaFile):
+    async def _resolve_file(self, file: Union[str, Node]) -> Optional[Node]:
+        """Resolve file argument to Node."""
+        if isinstance(file, Node):
             return file
         
-        if not self._nodes:
+        if self._node_service is None:
             await self._load_nodes()
         
-        if file in self._nodes:
-            return self._nodes[file]
+        node = self._node_service.get(file)
+        if node:
+            return node
         
         return await self.find(file)

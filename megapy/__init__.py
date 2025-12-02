@@ -1,21 +1,20 @@
 """
-MegaPy - Professional Python library for MEGA cloud storage.
+MegaPy - Async Python library for MEGA cloud storage.
 
-Session-based usage (like Telethon):
+Usage:
     >>> from megapy import MegaClient
     >>> 
-    >>> client = MegaClient("my_session")
-    >>> await client.start()  # Prompts for credentials if needed
-    >>> files = await client.list_files()
-
-Direct credentials usage:
-    >>> async with MegaClient(email, password) as mega:
-    ...     files = await mega.list_files()
-    ...     await mega.upload("file.txt")
+    >>> async with MegaClient("session") as mega:
+    ...     root = await mega.get_root()
+    ...     for node in root:
+    ...         print(node)
 """
-from .client import MegaClient, MegaFile, UserInfo
-from .nodes import MegaNode, MegaNodeBuilder
-from .core.storage.facade import StorageFacade
+from .client import MegaClient, UserInfo
+from .node import Node
+
+# Backward compatibility aliases
+MegaFile = Node
+MegaNode = Node
 
 # Configuration
 from .core.api import (
@@ -39,30 +38,20 @@ from .core.session import (
 __version__ = '1.0.0'
 
 __all__ = [
-    # Main client
     'MegaClient',
-    'MegaFile',
+    'Node',
+    'MegaFile',  # Alias
+    'MegaNode',  # Alias
     'UserInfo',
-    'MegaNode',
-    'MegaNodeBuilder',
-    
-    # Session management
     'SessionStorage',
     'SessionData',
     'SQLiteSession',
     'MemorySession',
-    
-    # Configuration
     'APIConfig',
     'ProxyConfig', 
     'SSLConfig',
     'TimeoutConfig',
     'RetryConfig',
-    
-    # Low-level async
     'AsyncAPIClient',
     'AsyncAuthService',
-    
-    # Legacy
-    'StorageFacade',
 ]

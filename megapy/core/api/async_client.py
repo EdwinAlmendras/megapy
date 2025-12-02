@@ -303,3 +303,51 @@ class AsyncAPIClient:
             API response
         """
         return await self.request({'a': 'm', 'n': handle, 't': target})
+    
+    async def get_media_codecs(self) -> Dict[str, Any]:
+        """
+        Get media codecs list from MEGA.
+        
+        Returns:
+            Dict with container, video, audio codec mappings
+        """
+        result = await self.request({'a': 'mc'})
+        
+        if not isinstance(result, list) or len(result) != 2:
+            return {}
+        
+        # Parse the codec list (format from MEGA API)
+        # result[0] = version number
+        # result[1] = [[container list], [video list], [audio list], [shortformat list]]
+        data = {
+            'version': result[0],
+            'container': {},
+            'video': {},
+            'audio': {},
+            'shortformat': {}
+        }
+        
+        sections = result[1]
+        keys = ['container', 'video', 'audio', 'shortformat']
+        
+        for i, sec in enumerate(sections):
+            if i >= len(keys):
+                break
+            key = keys[i]
+            
+            if i < 3:
+                # container, video, audio: [[id, name, mime], ...]
+                for item in sec:
+                    codec_id = item[0]
+                    codec_name = item[1]
+                    data[key][codec_id] = codec_name
+            else:
+                # shortformat: [[id, container_id, video_id, audio_id], ...]
+                for item in sec:
+                    sf_id = item[0]
+                    container = data['container'].get(item[1], '')
+                    video = data['video'].get(item[2], '')
+                    audio = data['audio'].get(item[3], '')
+                    data[key][sf_id] = (container, video, audio)
+        
+        return data

@@ -154,6 +154,14 @@ class UploadCoordinator:
         # Extract node handle from response
         node_handle = self._extract_node_handle(response)
         
+        # Step 9: Upload media attributes if provided (for video/audio files)
+        if config.media_info:
+            try:
+                await self._upload_media_attributes(node_handle, config.media_info, file_key)
+                self._logger.debug("Media attributes uploaded")
+            except Exception as e:
+                self._logger.warning(f"Failed to upload media attributes: {e}")
+        
         self._logger.info(f"Upload complete: {node_handle}")
         
         return UploadResult(
@@ -290,3 +298,36 @@ class UploadCoordinator:
         if 'f' in response and len(response['f']) > 0:
             return response['f'][0].get('h', '')
         return ''
+    
+    async def _upload_media_attributes(
+        self,
+        node_handle: str,
+        media_info: Any,
+        file_key: bytes
+    ) -> None:
+        """
+        Upload media attributes (type 8 and optionally 9) for video/audio files.
+        
+        Uses the 'pfa' (put file attribute) API command.
+        
+        Args:
+            node_handle: The node handle to attach attributes to
+            media_info: MediaInfo object with video/audio metadata
+            file_key: 32-byte file encryption key
+        """
+        from ..attributes import MediaAttributeService
+        
+        service = MediaAttributeService()
+        fa_string = service.encode(media_info, file_key)
+        
+        if not fa_string:
+            return
+        
+        # Use pfa command to add media attributes
+        result = await self._api.request({
+            'a': 'pfa',
+            'n': node_handle,
+            'fa': fa_string
+        })
+        
+        self._logger.debug(f"Media attributes stored: {fa_string}")
