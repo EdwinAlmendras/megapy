@@ -11,6 +11,8 @@ class ChunkUploader:
     """
     Handles uploading encrypted chunks to MEGA.
     
+    Reuses HTTP session for all chunks (critical for performance).
+    
     Responsibilities:
     - Send chunks to upload URL
     - Handle HTTP responses
@@ -19,22 +21,45 @@ class ChunkUploader:
     
     DEFAULT_TIMEOUT = 120
     
-    def __init__(self, upload_url: str, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(
+        self, 
+        upload_url: str, 
+        timeout: int = DEFAULT_TIMEOUT,
+        session: Optional[aiohttp.ClientSession] = None
+    ):
         """
         Initialize chunk uploader.
         
         Args:
             upload_url: Base URL for chunk uploads
             timeout: Request timeout in seconds
+            session: Optional shared session (RECOMMENDED for performance)
         """
         self._upload_url = upload_url
         self._timeout = timeout
         self._upload_token: Optional[str] = None
+        self._session = session
+        self._owns_session = False
     
     @property
     def upload_url(self) -> str:
         """Returns the upload URL."""
         return self._upload_url
+    
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create HTTP session."""
+        if self._session is None:
+            self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
+            )
+            self._owns_session = True
+        return self._session
+    
+    async def close(self):
+        """Close session if we own it."""
+        if self._owns_session and self._session:
+            await self._session.close()
+            self._session = None
     
     async def upload_chunk(
         self,
@@ -62,17 +87,17 @@ class ChunkUploader:
         
         url = f"{self._upload_url}/{start_position}"
         headers = {"Content-Length": str(len(encrypted_chunk))}
+        session = await self._get_session()
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                data=encrypted_chunk,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=self._timeout)
-            ) as response:
-                response.raise_for_status()
-                response_text = await response.text()
-                return self._process_response(response_text, chunk_index)
+        async with session.post(
+            url,
+            data=encrypted_chunk,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=self._timeout)
+        ) as response:
+            response.raise_for_status()
+            response_text = await response.text()
+            return self._process_response(response_text, chunk_index)
     
     def _process_response(self, response_text: str, chunk_index: int) -> str:
         """

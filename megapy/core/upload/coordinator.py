@@ -105,9 +105,12 @@ class UploadCoordinator:
         self._logger.info(f"File split into {len(chunks)} chunks")
         
         # Step 5: Upload chunks
-        await self._upload_chunks(
-            path, chunks, encryption, chunk_uploader, file_size
-        )
+        try:
+            await self._upload_chunks(
+                path, chunks, encryption, chunk_uploader, file_size
+            )
+        finally:
+            await chunk_uploader.close()
         
         # Step 6: Get original key (24 bytes) for thumbnail encryption
         # and finalize to get the 32-byte file key for node creation
