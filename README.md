@@ -12,7 +12,7 @@ A professional, async-first Python library for MEGA cloud storage. Built with SO
 - **Configurable**: Proxy, SSL, timeouts, retries, custom headers
 - **Secure**: Full support for MEGA's end-to-end encryption
 - **SOLID**: Clean architecture with dependency injection
-- **Tested**: 270+ unit tests with real account e2e tests
+- **Tested**: 340+ unit tests with real account e2e tests
 
 ## Installation
 
@@ -434,7 +434,7 @@ Auto-generation of thumbnails and previews for images and videos.
 
 ### ThumbnailService
 
-Generates 120x120 JPEG thumbnails at 70% quality.
+Generates 240x240 JPEG thumbnails at 80% quality (MEGA standard).
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
@@ -445,7 +445,7 @@ Generates 120x120 JPEG thumbnails at 70% quality.
 
 ### PreviewService
 
-Generates JPEG previews with max 1000px dimension at 75% quality.
+Generates JPEG previews with max 1024px dimension at 85% quality (MEGA standard).
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
@@ -535,8 +535,8 @@ with open("thumb.jpg", "wb") as f:
 | `encryption_key` | `bytes` | auto | Custom encryption key |
 | `max_concurrent_uploads` | `int` | `4` | Concurrent chunk uploads |
 | `timeout` | `int` | `120` | Request timeout (seconds) |
-| `thumbnail` | `bytes` | `None` | Thumbnail image (120x120 JPEG 70%) |
-| `preview` | `bytes` | `None` | Preview image (max 1000px JPEG 75%) |
+| `thumbnail` | `bytes` | `None` | Thumbnail image (240x240 JPEG 80%) |
+| `preview` | `bytes` | `None` | Preview image (max 1024px JPEG 85%) |
 | `auto_thumbnail` | `bool` | `True` | Auto-generate thumbnail |
 | `auto_preview` | `bool` | `True` | Auto-generate preview |
 | `custom_attributes` | `CustomAttributes` | `None` | Custom attributes |

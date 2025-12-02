@@ -1,4 +1,20 @@
-- refactorize crypto
-- refactorize api
-- refactorize auth
-- refactorize storage files ?? 
+# MegaPy TODO
+
+## Completed
+- [x] Thumbnail/Preview upload - Fixed URL endpoint bug (was always /0, now uses /{attr_type})
+- [x] MediaProcessor - Added is_media(), is_image(), is_video(), process() methods
+- [x] MediaResult dataclass for thumbnail/preview processing results
+- [x] Unit tests for MediaProcessor, ThumbnailService, PreviewService (54 tests)
+- [x] Unit tests for file attribute upload (URL endpoints, encryption, format)
+
+## Pending Refactoring
+- [ ] Refactorize crypto module
+- [ ] Refactorize api module  
+- [ ] Refactorize auth module
+- [ ] Refactorize storage files
+
+## Future Improvements
+- [ ] Add support for more video codecs in MediaInfo
+- [ ] Improve video thumbnail extraction (better frame selection)
+- [ ] Add batch upload with parallel processing
+- [ ] Add download progress for file attributes (thumbnails/previews)
