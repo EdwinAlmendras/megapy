@@ -651,11 +651,11 @@ class MediaProcessor:
             return None
     
     def generate_video_preview(self, file_path) -> Optional[bytes]:
-        """Generate preview from video frame."""
+        """Generate grid preview from video frames."""
         try:
-            from .preview import PreviewService
-            service = PreviewService()
-            return service.generate_from_video(file_path, self.video_frame_time)
+            from megapy.cli.grid import generate_grid_preview
+            from pathlib import Path
+            return generate_grid_preview(Path(file_path))
         except Exception:
             return None
     
