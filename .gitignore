@@ -8,6 +8,7 @@ __pycache# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
+*jpg
 
 # C extensions
 *.so

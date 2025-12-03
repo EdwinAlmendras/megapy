@@ -30,7 +30,7 @@ class ThumbnailService:
         >>> # thumb_data is bytes of 240x240 JPEG
     """
     
-    SIZE = (320, 320) # 240
+    SIZE = (240, 240) # 240
     QUALITY = 80  # MEGA uses 0.80
     FORMAT = 'JPEG'
     
@@ -74,8 +74,20 @@ class ThumbnailService:
             img = self._crop_center_square(img) """
         
         # Resize to 240x240 TODO i change resize to thumbnail img = img.resize
-        img.thumbnail(self.SIZE, Image.Resampling.LANCZOS)
+        # img = img.resize(self.SIZE, Image.Resampling.LANCZOS)
         
+        
+        w, h = img.size
+        SIZE = self.SIZE[0]
+        if w < h:
+            new_w = SIZE
+            new_h = int(h * SIZE / w)
+        else:
+            new_h = SIZE
+            new_w = int(w * SIZE / h)
+
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                
         # Save as JPEG
         output = io.BytesIO()
         img.save(output, format=self.FORMAT, quality=self.QUALITY, optimize=True)
