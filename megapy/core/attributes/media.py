@@ -678,7 +678,7 @@ class MediaProcessor:
         else:  # >= 20 minutes
             grid_size = 5
         
-        grid_path = await generate_video_grid(Path(file_path), grid_size=grid_size, max_size=160, quality=75)
+        grid_path = await generate_video_grid(Path(file_path), grid_size=grid_size, max_size=320, quality=75)
         return grid_path.read_bytes()
     
     async def _get_video_duration(self, file_path) -> float:

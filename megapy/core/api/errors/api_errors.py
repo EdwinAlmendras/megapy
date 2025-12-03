@@ -44,8 +44,8 @@ class APIErrorCodes:
 class MegaAPIError(Exception):
     """Exception raised for MEGA API errors."""
     
-    def __init__(self, code: int):
+    def __init__(self, code: int, message: str = None):
         self.code = code
-        self.message = APIErrorCodes.get_message(code)
+        self.message = message or APIErrorCodes.get_message(code)
         super().__init__(self.message)
 
