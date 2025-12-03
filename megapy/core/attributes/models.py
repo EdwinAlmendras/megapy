@@ -3,16 +3,16 @@ Attribute models for MEGA files.
 
 Keys are minimized to save space (following MEGA conventions):
 - n: name
+- t: modification time
 - lbl: label (color)
 - fav: favorite
-- e: extra/custom attributes
-  - i: document_id
-  - u: url
-  - d: date
+- m: mega_id (links to MongoDB)
+
+All custom attributes are stored FLAT (not nested).
 """
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, Any, Union
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, Union, Set
 from enum import IntEnum
 from datetime import datetime
 
@@ -25,45 +25,47 @@ class AttributeType(IntEnum):
 
 
 @dataclass
-class CustomAttributes:
+class FileAttributes:
     """
-    Custom attributes stored in the 'e' (extra) object.
+    Complete file attributes for MEGA.
     
-    All fields use minimized keys to save space:
-    - i: document_id
-    - u: url  
-    - d: date (Unix timestamp)
+    All attributes are stored FLAT (not nested):
+    - n: name (required)
+    - t: modification time (Unix timestamp)
+    - lbl: label/color (0-7)
+    - fav: favorite (0/1)
+    - m: mega_id (links to MongoDB source_id)
     
     Example:
-        >>> attrs = CustomAttributes(document_id="DOC123", url="https://example.com")
+        >>> attrs = FileAttributes(name="video.mp4", mega_id="abc123")
         >>> attrs.to_dict()
-        {'i': 'DOC123', 'u': 'https://example.com'}
+        {'n': 'video.mp4', 'm': 'abc123'}
+        
+        >>> # With exclusions (for storage)
+        >>> attrs.to_dict(exclude={'m'})
+        {'n': 'video.mp4'}
     """
-    document_id: Optional[str] = None  # i
-    url: Optional[str] = None  # u
-    date: Optional[Union[int, datetime]] = None  # d (Unix timestamp)
+    name: str  # n (required)
+    mtime: Optional[Union[int, datetime]] = None  # t
+    label: int = 0  # lbl
+    favorite: bool = False  # fav
+    mega_id: Optional[str] = None  # m (links to MongoDB)
     
-    # Additional custom fields (minimized keys)
+    # Extra custom attributes (flat, single-char keys)
     _extra: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
-        # Convert datetime to timestamp
-        if isinstance(self.date, datetime):
-            self.date = int(self.date.timestamp())
+        if isinstance(self.mtime, datetime):
+            self.mtime = int(self.mtime.timestamp())
     
-    def set(self, key: str, value: Any) -> 'CustomAttributes':
+    def set(self, key: str, value: Any) -> 'FileAttributes':
         """
-        Set a custom attribute with minimized key.
+        Set a custom attribute.
         
         Args:
-            key: Single character key (e.g., 't' for type)
+            key: Short key (1-2 chars recommended)
             value: Attribute value
-            
-        Returns:
-            Self for chaining
         """
-        if len(key) > 2:
-            raise ValueError(f"Key should be 1-2 characters for space efficiency: {key}")
         self._extra[key] = value
         return self
     
@@ -71,117 +73,34 @@ class CustomAttributes:
         """Get a custom attribute."""
         return self._extra.get(key, default)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, exclude: Optional[Set[str]] = None) -> Dict[str, Any]:
         """
         Convert to dictionary with minimized keys.
         
-        Returns:
-            Dict with minimized keys (i, u, d, etc.)
-        """
-        result = {}
-        
-        if self.document_id is not None:
-            result['i'] = self.document_id
-        if self.url is not None:
-            result['u'] = self.url
-        if self.date is not None:
-            result['d'] = self.date
-        
-        # Add extra attributes
-        result.update(self._extra)
-        
-        return result
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'CustomAttributes':
-        """
-        Create from dictionary with minimized keys.
-        
         Args:
-            data: Dict with minimized keys
-            
-        Returns:
-            CustomAttributes instance
-        """
-        known_keys = {'i', 'u', 'd'}
-        extra = {k: v for k, v in data.items() if k not in known_keys}
-        
-        return cls(
-            document_id=data.get('i'),
-            url=data.get('u'),
-            date=data.get('d'),
-            _extra=extra
-        )
-
-
-@dataclass
-class FileAttributes:
-    """
-    Complete file attributes for MEGA.
-    
-    Standard attributes:
-    - n: name (required)
-    - t: modification time (Unix timestamp in seconds)
-    - lbl: label/color (0-7)
-    - fav: favorite (0/1)
-    - e: extra/custom attributes
-    
-    The modification time (mtime) is stored in the 't' attribute as a Unix
-    timestamp (seconds since epoch). This preserves the original file's
-    modification date when uploading to MEGA, matching the official web client
-    behavior.
-    
-    Example:
-        >>> attrs = FileAttributes(
-        ...     name="document.pdf",
-        ...     mtime=1701532800,  # Dec 2, 2023
-        ...     label=1,
-        ...     custom=CustomAttributes(document_id="DOC123")
-        ... )
-        >>> attrs.to_dict()
-        {'n': 'document.pdf', 't': 1701532800, 'lbl': 1, 'e': {'i': 'DOC123'}}
-    """
-    name: str  # n (required)
-    mtime: Optional[Union[int, datetime]] = None  # t (modification time as Unix timestamp)
-    label: int = 0  # lbl (0=none, 1=red, 2=orange, 3=yellow, 4=green, 5=blue, 6=purple, 7=grey)
-    favorite: bool = False  # fav
-    custom: Optional[CustomAttributes] = None  # e
-    
-    # Raw extra data from API (for unknown fields)
-    _raw: Dict[str, Any] = field(default_factory=dict)
-    
-    def __post_init__(self):
-        # Convert datetime to Unix timestamp
-        if isinstance(self.mtime, datetime):
-            self.mtime = int(self.mtime.timestamp())
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert to dictionary with minimized keys for MEGA API.
+            exclude: Set of keys to exclude (e.g., {'m'} to exclude mega_id)
         
         Returns:
             Dict ready for JSON serialization
         """
+        exclude = exclude or set()
         result: Dict[str, Any] = {'n': self.name}
         
-        # Modification time (stored as 't' attribute)
-        if self.mtime is not None:
+        if self.mtime is not None and 't' not in exclude:
             result['t'] = self.mtime
         
-        if self.label > 0:
+        if self.label > 0 and 'lbl' not in exclude:
             result['lbl'] = self.label
         
-        if self.favorite:
+        if self.favorite and 'fav' not in exclude:
             result['fav'] = 1
         
-        if self.custom:
-            custom_dict = self.custom.to_dict()
-            if custom_dict:  # Only add if not empty
-                result['e'] = custom_dict
+        if self.mega_id is not None and 'm' not in exclude:
+            result['m'] = self.mega_id
         
-        # Include any raw/unknown fields
-        for key, value in self._raw.items():
-            if key not in ('n', 't', 'lbl', 'fav', 'e'):
+        # Add extra attributes (excluding specified keys)
+        for key, value in self._extra.items():
+            if key not in exclude:
                 result[key] = value
         
         return result
@@ -189,7 +108,7 @@ class FileAttributes:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'FileAttributes':
         """
-        Create from dictionary with minimized keys.
+        Create from dictionary.
         
         Args:
             data: Dict from MEGA API
@@ -197,44 +116,43 @@ class FileAttributes:
         Returns:
             FileAttributes instance
         """
-        custom = None
-        if 'e' in data and isinstance(data['e'], dict):
-            custom = CustomAttributes.from_dict(data['e'])
-        
-        known_keys = {'n', 't', 'lbl', 'fav', 'e'}
-        raw = {k: v for k, v in data.items() if k not in known_keys}
+        known_keys = {'n', 't', 'lbl', 'fav', 'm'}
+        extra = {k: v for k, v in data.items() if k not in known_keys}
         
         return cls(
             name=data.get('n', ''),
             mtime=data.get('t'),
             label=data.get('lbl', 0),
             favorite=bool(data.get('fav', 0)),
-            custom=custom,
-            _raw=raw
+            mega_id=data.get('m'),
+            _extra=extra
         )
     
-    def with_custom(self, **kwargs) -> 'FileAttributes':
+    @classmethod
+    def create(
+        cls,
+        name: str,
+        mega_id: Optional[str] = None,
+        mtime: Optional[Union[int, datetime]] = None,
+        **extra
+    ) -> 'FileAttributes':
         """
-        Add custom attributes.
+        Factory method for creating FileAttributes.
         
         Args:
-            **kwargs: Custom attribute values
+            name: File name
+            mega_id: ID linking to MongoDB (stored as 'm')
+            mtime: Modification time
+            **extra: Additional custom attributes
             
         Returns:
-            Self for chaining
+            FileAttributes instance
         """
-        if self.custom is None:
-            self.custom = CustomAttributes()
-        
-        for key, value in kwargs.items():
-            if key == 'document_id':
-                self.custom.document_id = value
-            elif key == 'url':
-                self.custom.url = value
-            elif key == 'date':
-                self.custom.date = value
-            else:
-                # Use first character as key for unknowns
-                self.custom.set(key[0] if len(key) > 1 else key, value)
-        
-        return self
+        attrs = cls(name=name, mega_id=mega_id, mtime=mtime)
+        for key, value in extra.items():
+            attrs.set(key, value)
+        return attrs
+
+
+# Backward compatibility alias
+CustomAttributes = FileAttributes

@@ -10,7 +10,7 @@ import json
 from typing import Dict, Any, Optional, Union
 from Crypto.Cipher import AES
 
-from .models import FileAttributes, CustomAttributes
+from .models import FileAttributes
 
 
 class AttributesPacker:

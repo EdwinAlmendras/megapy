@@ -582,11 +582,12 @@ class MegaClient:
         dest_folder: Optional[str] = None,
         name: Optional[str] = None,
         progress_callback: Optional[Callable[[UploadProgress], None]] = None,
-        custom: Optional[Dict[str, Any]] = None,
+        mega_id: Optional[str] = None,
         label: int = 0,
         auto_thumb: bool = True,
         thumbnail: Optional[Union[str, Path, bytes]] = None,
-        preview: Optional[Union[str, Path, bytes]] = None
+        preview: Optional[Union[str, Path, bytes]] = None,
+        **extra_attrs
     ) -> MegaFile:
         """
         Upload a file to MEGA.
@@ -596,11 +597,12 @@ class MegaClient:
             dest_folder: Destination folder handle. None for root.
             name: Optional custom name for the file
             progress_callback: Optional callback for progress updates
-            custom: Custom attributes dict. Keys: i=document_id, u=url, d=date, or any 1-2 char key
+            mega_id: ID linking to MongoDB (stored as 'm' attribute, flat)
             label: Color label (0-7: none, red, orange, yellow, green, blue, purple, grey)
             auto_thumb: Auto-generate thumbnail/preview for images/videos
             thumbnail: Custom thumbnail (path or bytes). Overrides auto_thumb.
             preview: Custom preview (path or bytes). Overrides auto_thumb.
+            **extra_attrs: Additional custom attributes (flat, single-char keys)
             
         Returns:
             MegaFile representing the uploaded file
@@ -609,12 +611,11 @@ class MegaClient:
             # Simple upload
             await mega.upload("file.txt")
             
-            # With custom attributes
-            await mega.upload("doc.pdf", custom={
-                'i': 'DOC-001',
-                'u': 'https://example.com',
-                't': 'invoice'
-            })
+            # With mega_id (links to MongoDB)
+            await mega.upload("doc.pdf", mega_id="abc123")
+            
+            # With extra attributes
+            await mega.upload("doc.pdf", mega_id="abc123", t="invoice")
             
             # Image with auto thumbnail
             await mega.upload("photo.jpg")  # auto-generates thumb & preview
@@ -633,26 +634,16 @@ class MegaClient:
         
         target_id = dest_folder or self._node_service.root_handle
         
-        # Build custom attributes if provided
-        custom_attrs = None
-        if custom:
-            from .core.upload.models import CustomAttributes
-            custom_attrs = CustomAttributes(
-                document_id=custom.get('i'),
-                url=custom.get('u'),
-                date=custom.get('d')
-            )
-            # Add extra keys
-            for k, v in custom.items():
-                if k not in ('i', 'u', 'd'):
-                    custom_attrs.set(k, v)
-        
-        # Build file attributes
+        # Build file attributes (flat, with mega_id as 'm')
         attrs = FileAttributes(
             name=name or path.name,
             label=label,
-            custom=custom_attrs
+            mega_id=mega_id
         )
+        
+        # Add extra attributes (flat)
+        for key, value in extra_attrs.items():
+            attrs.set(key, value)
         
         # Handle thumbnail/preview - custom or auto-generated
         thumb_data = None

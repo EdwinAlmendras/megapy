@@ -642,74 +642,80 @@ class MediaProcessor:
             return None
     
     async def generate_video_thumbnail(self, file_path) -> Optional[bytes]:
-        """Generate thumbnail (cover) from video using mediakit."""
-        from mediakit.video.thumbnail import ThumbnailGenerator
-        from pathlib import Path
-        import asyncio
+        """
+        Generate 240x240 thumbnail from video frame.
         
-        generator = ThumbnailGenerator()
-        thumb_path = await generator.generate_async(Path(file_path))
-        
-        # Resize to 240x240 for MEGA
+        Uses ffmpeg to extract a frame, then resizes to MEGA thumbnail spec.
+        """
         from .thumbnail import ThumbnailService
-        service = ThumbnailService()
-        return service.generate(thumb_path)
-
-    
-    async def generate_video_preview(self, file_path) -> Optional[bytes]:
-        """
-        Generate grid preview from video using mediakit.
-        
-        Grid size is dynamic based on video duration:
-        - < 3 minutes: 3x3 grid
-        - 3-20 minutes: 4x4 grid  
-        - > 20 minutes: 5x5 grid
-        """
-        from mediakit.video import generate_video_grid
         from pathlib import Path
-        
-        # Get video duration to determine grid size
-        duration = await self._get_video_duration(file_path)
-        
-        if duration < 30:
-            grid_size = 2
-        elif duration < 180:  # < 3 minutes
-            grid_size = 3
-        elif duration < 1200:  # < 20 minutes
-            grid_size = 4
-        else:  # >= 20 minutes
-            grid_size = 5
-        
-        grid_path = await generate_video_grid(Path(file_path), grid_size=grid_size, max_size=240, quality=80)
-        return grid_path.read_bytes()
-    
-    async def _get_video_duration(self, file_path) -> float:
-        """Get video duration in seconds using ffprobe."""
         import subprocess
-        import asyncio
+        import tempfile
         
         try:
+            # Extract frame at 1 second
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                tmp_path = tmp.name
+            
             cmd = [
-                'ffprobe',
-                '-v', 'quiet',
-                '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                str(file_path)
+                'ffmpeg', '-y', '-ss', str(self.video_frame_time),
+                '-i', str(file_path),
+                '-vframes', '1', '-q:v', '2',
+                tmp_path
             ]
             
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await proc.communicate()
+            result = subprocess.run(cmd, capture_output=True, timeout=30)
+            if result.returncode != 0:
+                return None
             
-            if proc.returncode == 0 and stdout:
-                return float(stdout.decode().strip())
+            # Resize to 240x240 for MEGA
+            service = ThumbnailService()
+            thumb_data = service.generate(tmp_path)
+            
+            # Cleanup
+            Path(tmp_path).unlink(missing_ok=True)
+            return thumb_data
+            
         except Exception:
-            pass
+            return None
+
+    async def generate_video_preview(self, file_path) -> Optional[bytes]:
+        """
+        Generate max 1024px preview from video frame.
         
-        return 0.0  # Default: will use 3x3 grid
+        Extracts a frame and resizes to MEGA preview spec (max 1024x1024, 85% quality).
+        """
+        from .preview import PreviewService
+        from pathlib import Path
+        import subprocess
+        import tempfile
+        
+        try:
+            # Extract frame at 1 second
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                tmp_path = tmp.name
+            
+            cmd = [
+                'ffmpeg', '-y', '-ss', str(self.video_frame_time),
+                '-i', str(file_path),
+                '-vframes', '1', '-q:v', '2',
+                tmp_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, timeout=30)
+            if result.returncode != 0:
+                return None
+            
+            # Resize to max 1024px for MEGA preview
+            service = PreviewService()
+            preview_data = service.generate(tmp_path)
+            
+            # Cleanup
+            Path(tmp_path).unlink(missing_ok=True)
+            return preview_data
+            
+        except Exception:
+            return None
 
     
     @staticmethod
