@@ -38,7 +38,8 @@ class NodeCreator:
         target_id: str,
         file_key: bytes,
         attributes: Dict[str, Any],
-        file_attributes: str = None
+        file_attributes: str = None,
+        replace_handle: str = None
     ) -> Dict[str, Any]:
         """
         Create a file node in MEGA.
@@ -49,6 +50,7 @@ class NodeCreator:
             file_key: File encryption key
             attributes: File attributes dict
             file_attributes: Optional file attributes string (fa) for thumbnails/previews
+            replace_handle: Optional handle of existing file to replace (creates new version)
             
         Returns:
             API response with created node data
@@ -57,7 +59,7 @@ class NodeCreator:
             ValueError: If node creation fails
         """
         node_data = self._prepare_node_data(
-            upload_token, target_id, file_key, attributes, file_attributes
+            upload_token, target_id, file_key, attributes, file_attributes, replace_handle
         )
         
         # Support both sync and async clients
@@ -77,7 +79,8 @@ class NodeCreator:
         target_id: str,
         file_key: bytes,
         attributes: Dict[str, Any],
-        file_attributes: str = None
+        file_attributes: str = None,
+        replace_handle: str = None
     ) -> Dict[str, Any]:
         """
         Prepare node data for API request.
@@ -88,6 +91,7 @@ class NodeCreator:
             file_key: File key
             attributes: File attributes
             file_attributes: Optional fa string for thumbnails/previews
+            replace_handle: Optional handle of file to replace (creates version)
             
         Returns:
             Node data dictionary
@@ -108,6 +112,11 @@ class NodeCreator:
         # Add file attributes (thumbnail/preview) if provided
         if file_attributes:
             node['fa'] = file_attributes
+        
+        # Add old version handle for file versioning
+        # When 'ov' is set, MEGA creates a new version and keeps the old file
+        if replace_handle:
+            node['ov'] = replace_handle
         
         return {
             'a': 'p',  # put command

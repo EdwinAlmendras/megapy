@@ -49,6 +49,7 @@ class ChunkUploader:
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._session is None:
+            print("[DEBUG] Creating NEW aiohttp session")
             self._session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
             )
@@ -89,14 +90,21 @@ class ChunkUploader:
         headers = {"Content-Length": str(len(encrypted_chunk))}
         session = await self._get_session()
         
+        import time
+        t0 = time.time()
+        
         async with session.post(
             url,
             data=encrypted_chunk,
             headers=headers,
+            ssl=False,  # Disable SSL verification like mega_api
             timeout=aiohttp.ClientTimeout(total=self._timeout)
         ) as response:
             response.raise_for_status()
             response_text = await response.text()
+            elapsed = time.time() - t0
+            speed = len(encrypted_chunk) / elapsed / 1024
+            print(f"[DEBUG] Chunk {chunk_index}: {len(encrypted_chunk)//1024}KB in {elapsed:.2f}s = {speed:.1f} KB/s")
             return self._process_response(response_text, chunk_index)
     
     def _process_response(self, response_text: str, chunk_index: int) -> str:

@@ -650,6 +650,100 @@ with open("thumb.jpg", "wb") as f:
     f.write(thumb)
 ```
 
+### Downloading Thumbnails & Previews
+
+You can download thumbnails and previews from files stored in MEGA:
+
+```python
+async with MegaClient("session") as mega:
+    await mega.start()
+    
+    root = await mega.get_root()
+    
+    for node in root.walk():
+        if node.is_file:
+            # Check if file has thumbnail/preview
+            if node.has_thumbnail:
+                thumb = await node.get_thumbnail()
+                if thumb:
+                    with open(f"{node.name}_thumb.jpg", "wb") as f:
+                        f.write(thumb)
+            
+            if node.has_preview:
+                preview = await node.get_preview()
+                if preview:
+                    with open(f"{node.name}_preview.jpg", "wb") as f:
+                        f.write(preview)
+```
+
+| Property/Method | Type | Description |
+|-----------------|------|-------------|
+| `has_thumbnail` | `bool` | True if file has thumbnail |
+| `has_preview` | `bool` | True if file has preview |
+| `get_thumbnail()` | `async -> bytes` | Download decrypted thumbnail (240x240 JPEG) |
+| `get_preview()` | `async -> bytes` | Download decrypted preview (max 1024px JPEG) |
+
+---
+
+## File Versioning (Update)
+
+MEGA supports file versioning - when you update a file, the old version is preserved.
+
+### Basic Update
+
+```python
+async with MegaClient("session") as mega:
+    # Upload initial file
+    file_v1 = await mega.upload("report_v1.pdf", name="report.pdf")
+    
+    # Update with new content (creates version 2)
+    file_v2 = await mega.update(file_v1, "report_v2.pdf")
+    
+    # Update again (creates version 3)
+    file_v3 = await mega.update(file_v2, "report_v3.pdf")
+```
+
+### Update by Path
+
+```python
+new_version = await mega.update(
+    "/Documents/report.pdf",  # Existing file in MEGA
+    "updated_report.pdf"       # Local file with new content
+)
+```
+
+### Update with New Name
+
+```python
+new_version = await mega.update(
+    old_file,
+    "new_data.csv",
+    name="data_2024.csv"  # Rename during update
+)
+```
+
+### update() Method
+
+```python
+await mega.update(
+    file: Union[str, MegaFile],           # File to update (handle, path, or node)
+    new_content: Union[str, Path],        # Local file path with new content
+    name: Optional[str] = None,           # Optional new name
+    progress_callback: Optional[Callable] = None,
+    auto_thumb: bool = True,              # Auto-generate thumbnails
+    thumbnail: Optional[bytes] = None,    # Custom thumbnail
+    preview: Optional[bytes] = None       # Custom preview
+)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `file` | `str \| MegaFile` | Existing file to update |
+| `new_content` | `str \| Path` | Path to local file with new content |
+| `name` | `str` | Optional new name for the file |
+| `progress_callback` | `Callable` | Progress updates callback |
+| `auto_thumb` | `bool` | Auto-generate thumbnail for media |
+
 ---
 
 ## Upload Configuration

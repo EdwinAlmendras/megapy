@@ -158,6 +158,84 @@ class Node:
         return info is not None and info.is_audio
     
     # =========================================================================
+    # Thumbnail & Preview
+    # =========================================================================
+    
+    def _get_fa_handle(self, attr_type: int) -> Optional[str]:
+        """
+        Extract file attribute handle from 'fa' string.
+        
+        Args:
+            attr_type: 0=thumbnail, 1=preview, 8=media_info
+            
+        Returns:
+            Attribute handle or None
+        """
+        if not self.fa:
+            return None
+        
+        # Format: "user_id:type*handle/user_id:type*handle"
+        for part in self.fa.split('/'):
+            if ':' in part:
+                _, type_handle = part.split(':', 1)
+            else:
+                type_handle = part
+            
+            if '*' in type_handle:
+                t, handle = type_handle.split('*', 1)
+                try:
+                    if int(t) == attr_type:
+                        return handle
+                except ValueError:
+                    continue
+        
+        return None
+    
+    async def get_thumbnail(self) -> Optional[bytes]:
+        """
+        Download and decrypt thumbnail image.
+        
+        Returns:
+            Decrypted JPEG thumbnail bytes (240x240) or None
+            
+        Example:
+            >>> if node.has_thumbnail:
+            ...     thumb = await node.get_thumbnail()
+            ...     with open("thumb.jpg", "wb") as f:
+            ...         f.write(thumb)
+        """
+        if not self._client or not self.has_thumbnail:
+            return None
+        
+        handle = self._get_fa_handle(0)
+        if not handle:
+            return None
+        
+        return await self._client._download_file_attribute(self, handle, 0)
+    
+    async def get_preview(self) -> Optional[bytes]:
+        """
+        Download and decrypt preview image.
+        
+        Returns:
+            Decrypted JPEG preview bytes (max 1024px) or None
+            
+        Example:
+            >>> if node.has_preview:
+            ...     preview = await node.get_preview()
+            ...     with open("preview.jpg", "wb") as f:
+            ...         f.write(preview)
+        """
+        if not self._client or not self.has_preview:
+            return None
+        
+        handle = self._get_fa_handle(1)
+        if not handle:
+            return None
+        
+        return await self._client._download_file_attribute(self, handle, 1)
+    
+    # =========================================================================
     # Tree Navigation
     # =========================================================================
     

@@ -121,26 +121,39 @@ class FileAttributes:
     
     Standard attributes:
     - n: name (required)
+    - t: modification time (Unix timestamp in seconds)
     - lbl: label/color (0-7)
     - fav: favorite (0/1)
     - e: extra/custom attributes
     
+    The modification time (mtime) is stored in the 't' attribute as a Unix
+    timestamp (seconds since epoch). This preserves the original file's
+    modification date when uploading to MEGA, matching the official web client
+    behavior.
+    
     Example:
         >>> attrs = FileAttributes(
         ...     name="document.pdf",
+        ...     mtime=1701532800,  # Dec 2, 2023
         ...     label=1,
         ...     custom=CustomAttributes(document_id="DOC123")
         ... )
         >>> attrs.to_dict()
-        {'n': 'document.pdf', 'lbl': 1, 'e': {'i': 'DOC123'}}
+        {'n': 'document.pdf', 't': 1701532800, 'lbl': 1, 'e': {'i': 'DOC123'}}
     """
     name: str  # n (required)
+    mtime: Optional[Union[int, datetime]] = None  # t (modification time as Unix timestamp)
     label: int = 0  # lbl (0=none, 1=red, 2=orange, 3=yellow, 4=green, 5=blue, 6=purple, 7=grey)
     favorite: bool = False  # fav
     custom: Optional[CustomAttributes] = None  # e
     
     # Raw extra data from API (for unknown fields)
     _raw: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        # Convert datetime to Unix timestamp
+        if isinstance(self.mtime, datetime):
+            self.mtime = int(self.mtime.timestamp())
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -150,6 +163,10 @@ class FileAttributes:
             Dict ready for JSON serialization
         """
         result: Dict[str, Any] = {'n': self.name}
+        
+        # Modification time (stored as 't' attribute)
+        if self.mtime is not None:
+            result['t'] = self.mtime
         
         if self.label > 0:
             result['lbl'] = self.label
@@ -164,7 +181,7 @@ class FileAttributes:
         
         # Include any raw/unknown fields
         for key, value in self._raw.items():
-            if key not in ('n', 'lbl', 'fav', 'e'):
+            if key not in ('n', 't', 'lbl', 'fav', 'e'):
                 result[key] = value
         
         return result
@@ -184,11 +201,12 @@ class FileAttributes:
         if 'e' in data and isinstance(data['e'], dict):
             custom = CustomAttributes.from_dict(data['e'])
         
-        known_keys = {'n', 'lbl', 'fav', 'e'}
+        known_keys = {'n', 't', 'lbl', 'fav', 'e'}
         raw = {k: v for k, v in data.items() if k not in known_keys}
         
         return cls(
             name=data.get('n', ''),
+            mtime=data.get('t'),
             label=data.get('lbl', 0),
             favorite=bool(data.get('fav', 0)),
             custom=custom,

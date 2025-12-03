@@ -590,7 +590,7 @@ class MediaProcessor:
         ext = Path(file_path).suffix.lower()
         return ext in self.VIDEO_EXTENSIONS
     
-    def process(self, file_path) -> MediaResult:
+    async def process(self, file_path) -> MediaResult:
         """
         Process a media file to generate thumbnail and preview.
         
@@ -617,9 +617,9 @@ class MediaProcessor:
         elif self.is_video(path):
             result.media_type = 'video'
             if self.auto_thumbnail:
-                result.thumbnail = self.generate_video_thumbnail(path)
+                result.thumbnail = await self.generate_video_thumbnail(path)
             if self.auto_preview:
-                result.preview = self.generate_video_preview(path)
+                result.preview = await self.generate_video_preview(path)
         
         return result
     
@@ -641,23 +641,74 @@ class MediaProcessor:
         except Exception:
             return None
     
-    def generate_video_thumbnail(self, file_path) -> Optional[bytes]:
-        """Generate thumbnail from video frame."""
-        try:
-            from .thumbnail import ThumbnailService
-            service = ThumbnailService()
-            return service.generate_from_video(file_path, self.video_frame_time)
-        except Exception:
-            return None
+    async def generate_video_thumbnail(self, file_path) -> Optional[bytes]:
+        """Generate thumbnail (cover) from video using mediakit."""
+        from mediakit.video.thumbnail import ThumbnailGenerator
+        from pathlib import Path
+        import asyncio
+        
+        generator = ThumbnailGenerator()
+        thumb_path = await generator.generate_async(Path(file_path))
+        
+        # Resize to 240x240 for MEGA
+        from .thumbnail import ThumbnailService
+        service = ThumbnailService()
+        return service.generate(thumb_path)
+
     
-    def generate_video_preview(self, file_path) -> Optional[bytes]:
-        """Generate grid preview from video frames."""
+    async def generate_video_preview(self, file_path) -> Optional[bytes]:
+        """
+        Generate grid preview from video using mediakit.
+        
+        Grid size is dynamic based on video duration:
+        - < 3 minutes: 3x3 grid
+        - 3-20 minutes: 4x4 grid  
+        - > 20 minutes: 5x5 grid
+        """
+        from mediakit.video import generate_video_grid
+        from pathlib import Path
+        
+        # Get video duration to determine grid size
+        duration = await self._get_video_duration(file_path)
+        
+        if duration < 180:  # < 3 minutes
+            grid_size = 3
+        elif duration < 1200:  # < 20 minutes
+            grid_size = 4
+        else:  # >= 20 minutes
+            grid_size = 5
+        
+        grid_path = await generate_video_grid(Path(file_path), grid_size=grid_size, max_size=160, quality=75)
+        return grid_path.read_bytes()
+    
+    async def _get_video_duration(self, file_path) -> float:
+        """Get video duration in seconds using ffprobe."""
+        import subprocess
+        import asyncio
+        
         try:
-            from megapy.cli.grid import generate_grid_preview
-            from pathlib import Path
-            return generate_grid_preview(Path(file_path))
+            cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(file_path)
+            ]
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+            
+            if proc.returncode == 0 and stdout:
+                return float(stdout.decode().strip())
         except Exception:
-            return None
+            pass
+        
+        return 0.0  # Default: will use 3x3 grid
+
     
     @staticmethod
     def is_available() -> bool:

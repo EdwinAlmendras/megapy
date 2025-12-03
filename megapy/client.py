@@ -683,19 +683,14 @@ class MegaClient:
         
         # Auto-generate thumbnails if not provided and auto_thumb is True
         if auto_thumb and (thumb_data is None or preview_data is None):
-            try:
-                from .core.attributes import MediaProcessor
-                processor = MediaProcessor()
-                if processor.is_media(path):
-                    result = processor.process(path)
-                    if thumb_data is None:
-                        thumb_data = result.thumbnail
-                    if preview_data is None:
-                        preview_data = result.preview
-            except ImportError:
-                pass  # Pillow not installed
-            except Exception:
-                pass  # Silently ignore media processing errors
+            from .core.attributes import MediaProcessor
+            processor = MediaProcessor()
+            if processor.is_media(path):
+                result = await processor.process(path)
+                if thumb_data is None:
+                    thumb_data = result.thumbnail
+                if preview_data is None:
+                    preview_data = result.preview
         
         # Always extract media attributes for videos (independent of auto_thumb)
         try:
@@ -736,6 +731,162 @@ class MegaClient:
         # Add to node service cache
         if self._node_service:
             self._node_service.nodes[result.node_handle] = node
+        
+        return node
+    
+    async def update(
+        self,
+        file: Union[str, MegaFile],
+        new_content: Union[str, Path],
+        name: Optional[str] = None,
+        progress_callback: Optional[Callable[[UploadProgress], None]] = None,
+        auto_thumb: bool = True,
+        thumbnail: Optional[Union[str, Path, bytes]] = None,
+        preview: Optional[Union[str, Path, bytes]] = None
+    ) -> MegaFile:
+        """
+        Update an existing file with new content, creating a new version.
+        
+        MEGA's file versioning keeps the old file as a previous version,
+        accessible through the version history. This matches the behavior
+        of the official MEGA web client.
+        
+        Args:
+            file: Existing file to update (handle, path, or MegaFile object)
+            new_content: Path to local file with new content
+            name: Optional new name for the file (defaults to keeping original name)
+            progress_callback: Optional callback for progress updates
+            auto_thumb: Auto-generate thumbnail/preview for images/videos
+            thumbnail: Custom thumbnail (path or bytes)
+            preview: Custom preview (path or bytes)
+            
+        Returns:
+            MegaFile representing the new version
+            
+        Raises:
+            FileNotFoundError: If the file to update or new content doesn't exist
+            ValueError: If the target is a folder
+            
+        Example:
+            # Update a file by path
+            new_version = await mega.update("/Documents/report.pdf", "report_v2.pdf")
+            
+            # Update a file by handle
+            new_version = await mega.update(old_file.handle, "updated_data.txt")
+            
+            # Update with new name
+            new_version = await mega.update(old_file, "new_data.csv", name="data_2024.csv")
+            
+            # Get version history (the old version is preserved)
+            versions = await mega.get_versions(new_version)
+        """
+        self._ensure_logged_in()
+        
+        # Resolve the existing file
+        existing_file = await self._resolve_file(file)
+        if not existing_file:
+            raise FileNotFoundError(f"File not found: {file}")
+        
+        if existing_file.is_folder:
+            raise ValueError("Cannot update a folder, only files support versioning")
+        
+        # Get the parent folder of the existing file
+        parent_handle = existing_file.parent_handle
+        if not parent_handle:
+            # If no parent, use root
+            await self.load()
+            parent_handle = self._node_service.root.handle
+        
+        # Upload the new content as a replacement
+        new_path = Path(new_content)
+        if not new_path.exists():
+            raise FileNotFoundError(f"New content file not found: {new_content}")
+        
+        # Use original name if not specified
+        file_name = name or existing_file.name
+        
+        # Build attributes
+        attrs = FileAttributes(name=file_name)
+        
+        # Process thumbnails (same logic as upload)
+        thumb_data = None
+        preview_data = None
+        media_info = None
+        
+        if thumbnail is not None:
+            try:
+                from .core.attributes import ThumbnailService
+                thumb_gen = ThumbnailService()
+                thumb_source = Path(thumbnail) if isinstance(thumbnail, str) else thumbnail
+                thumb_data = thumb_gen.generate(thumb_source)
+            except Exception as e:
+                self._logger.warning(f"Failed to generate custom thumbnail: {e}")
+        
+        if preview is not None:
+            try:
+                from .core.attributes import PreviewService
+                preview_gen = PreviewService()
+                preview_source = Path(preview) if isinstance(preview, str) else preview
+                preview_data = preview_gen.generate(preview_source)
+            except Exception as e:
+                self._logger.warning(f"Failed to generate custom preview: {e}")
+        
+        if auto_thumb and (thumb_data is None or preview_data is None):
+            try:
+                from .core.attributes import MediaProcessor
+                processor = MediaProcessor()
+                if processor.is_media(new_path):
+                    result = processor.process(new_path)
+                    if thumb_data is None:
+                        thumb_data = result.thumbnail
+                    if preview_data is None:
+                        preview_data = result.preview
+            except Exception:
+                pass
+        
+        # Extract media info for videos
+        try:
+            from .core.attributes import MediaProcessor
+            processor = MediaProcessor()
+            if processor.is_video(new_path):
+                media_info = processor.extract_metadata(new_path)
+        except Exception:
+            pass
+        
+        # Create upload coordinator with replace_handle
+        coordinator = UploadCoordinator(
+            api_client=self._api,
+            master_key=self._master_key,
+            progress_callback=progress_callback
+        )
+        
+        config = UploadConfig(
+            file_path=new_path,
+            target_folder_id=parent_handle,
+            attributes=attrs,
+            thumbnail=thumb_data,
+            preview=preview_data,
+            media_info=media_info,
+            replace_handle=existing_file.handle  # Key: tells MEGA to create version
+        )
+        
+        result = await coordinator.upload(config)
+        
+        node = Node(
+            handle=result.node_handle,
+            name=file_name,
+            size=result.file_size,
+            is_folder=False,
+            parent_handle=parent_handle,
+            key=result.file_key,
+            _client=self
+        )
+        
+        # Update node service cache
+        if self._node_service:
+            self._node_service.nodes[result.node_handle] = node
+        
+        self._logger.info(f"File updated: {existing_file.handle} -> {result.node_handle}")
         
         return node
     

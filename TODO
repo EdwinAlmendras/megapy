@@ -15,6 +15,8 @@
 - [x] Add support for more video codecs in MediaInfo (HEVC, VP9, AV1)
 - [x] Retrieve and cache MEGA's codec list via 'mc' API command
 - [ ] Implement generate preview grid 3x3 or 4x4 with one option create_preview_grid option
+- [x] Added support for timestamp
+- [ ] Solve upload speed so slow why ? 
 
 - [ ] Improve video thumbnail extraction (better frame selection)
 

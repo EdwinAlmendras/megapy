@@ -69,26 +69,40 @@ class FileAttributes:
     
     Attributes:
         name: File name (n)
+        mtime: Modification time as Unix timestamp (t)
         label: Label color 0-7 (lbl)
         is_favorite: Favorite flag (fav)
         custom: Custom attributes in 'e' object
     
+    The modification time (mtime) is stored in the 't' attribute as a Unix
+    timestamp (seconds since epoch). This preserves the original file's
+    modification date when uploading to MEGA, matching the official web client.
+    
     Example:
         >>> attrs = FileAttributes(
         ...     name="doc.pdf",
+        ...     mtime=1701532800,
         ...     custom=CustomAttributes(document_id="123")
         ... )
         >>> attrs.to_dict()
-        {'n': 'doc.pdf', 'e': {'i': '123'}}
+        {'n': 'doc.pdf', 't': 1701532800, 'e': {'i': '123'}}
     """
     name: str
+    mtime: Optional[Union[int, datetime]] = None  # t (modification time)
     label: int = 0
     is_favorite: bool = False
     custom: Optional[CustomAttributes] = None
     
+    def __post_init__(self):
+        # Convert datetime to Unix timestamp
+        if isinstance(self.mtime, datetime):
+            self.mtime = int(self.mtime.timestamp())
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to MEGA attribute format."""
         result = {'n': self.name}
+        if self.mtime is not None:
+            result['t'] = self.mtime
         if self.label:
             result['lbl'] = self.label
         if self.is_favorite:
@@ -107,6 +121,7 @@ class FileAttributes:
             custom = CustomAttributes.from_dict(data['e'])
         return cls(
             name=data.get('n', data.get('name', '')),
+            mtime=data.get('t'),
             label=data.get('lbl', data.get('label', 0)),
             is_favorite=bool(data.get('fav', data.get('is_favorite', False))),
             custom=custom
@@ -167,6 +182,7 @@ class UploadConfig:
         auto_preview: Auto-generate preview for media files
         custom_attributes: Custom attributes for 'e' object
         media_info: Optional media metadata for video/audio files
+        replace_handle: Optional handle of existing file to replace (creates new version)
     """
     file_path: Path
     target_folder_id: str
@@ -180,6 +196,7 @@ class UploadConfig:
     auto_preview: bool = True
     custom_attributes: Optional[CustomAttributes] = None
     media_info: Optional[Any] = None  # MediaInfo from core.attributes
+    replace_handle: Optional[str] = None  # Handle of file to replace (for versioning)
     
     def __post_init__(self):
         """Validate and normalize config."""

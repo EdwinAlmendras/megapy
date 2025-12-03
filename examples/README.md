@@ -27,6 +27,8 @@ asyncio.run(main())
 | `06_file_operations.py` | Create, rename, move, delete |
 | `07_sessions.py` | Login persistence |
 | `08_advanced.py` | Proxy, config, batch ops |
+| `09_thumbnails.py` | Download thumbnails & previews |
+| `10_file_versioning.py` | Update files (versioning) |
 
 ## API Reference
 
@@ -85,6 +87,21 @@ if node.has_media_info:
     info.is_audio          # True if audio-only
 ```
 
+### Thumbnails & Previews
+
+```python
+# Check if file has thumbnail/preview
+if node.has_thumbnail:
+    thumb = await node.get_thumbnail()  # bytes
+    with open("thumb.jpg", "wb") as f:
+        f.write(thumb)
+
+if node.has_preview:
+    preview = await node.get_preview()  # bytes
+    with open("preview.jpg", "wb") as f:
+        f.write(preview)
+```
+
 ### Operations
 
 ```python
@@ -94,4 +111,9 @@ await mega.delete(node)
 await mega.rename(node, "new.pdf")
 await mega.move(node, folder)
 await mega.create_folder("Name")
+
+# Update file (creates new version)
+await mega.update(node, "new_content.pdf")
+await mega.update("/path/to/file.pdf", "updated.pdf")
+await mega.update(node, "new.pdf", name="renamed.pdf")
 ```

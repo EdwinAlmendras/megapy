@@ -91,6 +91,16 @@ class UploadCoordinator:
         path, file_size = self._validator.validate(config.file_path)
         self._logger.debug(f"File validated: {file_size} bytes")
         
+        # Step 1.5: Set modification time from file if not provided
+        # This preserves the original file's mtime, matching MEGA web client behavior
+        if config.attributes and config.attributes.mtime is None:
+            try:
+                file_mtime = int(path.stat().st_mtime)
+                config.attributes.mtime = file_mtime
+                self._logger.debug(f"File mtime set: {file_mtime}")
+            except (OSError, AttributeError) as e:
+                self._logger.debug(f"Could not get file mtime: {e}")
+        
         # Step 2: Get upload URL
         upload_url = await self._get_upload_url(file_size)
         self._logger.debug(f"Upload URL obtained")
@@ -151,7 +161,8 @@ class UploadCoordinator:
             config.target_folder_id,
             file_key,
             attributes,
-            file_attributes=fa_string
+            file_attributes=fa_string,
+            replace_handle=config.replace_handle
         )
         
         # Extract node handle from response
