@@ -3,7 +3,7 @@ test_files
 mega
 legacy
 test.*
-*session
+*.session
 __pycache# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

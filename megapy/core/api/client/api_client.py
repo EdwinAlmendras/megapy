@@ -6,7 +6,6 @@ from ..events import EventEmitter
 from ..session import SessionManager
 from ..request import RequestHandler, RequestBuilder
 from ..notifications import NotificationPuller
-from ..errors import MegaAPIError
 from megapy.core.logging import get_logger
 
 
