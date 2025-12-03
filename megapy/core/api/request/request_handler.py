@@ -5,7 +5,7 @@ from .request_builder import RequestBuilder
 from .response_handler import ResponseHandler
 from ..retry import RetryStrategy, ExponentialBackoffStrategy
 from ..errors import MegaAPIError
-from utils.logger import setup_logger
+from megapy.core.logging import get_logger
 
 
 class RequestHandler:
@@ -15,7 +15,7 @@ class RequestHandler:
         """Initializes request handler."""
         self.session = session
         self.retry_strategy = retry_strategy or ExponentialBackoffStrategy()
-        self.logger = setup_logger("REQUEST_HANDLER")
+        self.logger = get_logger("REQUEST_HANDLER")
     
     def execute(self, builder: RequestBuilder, json_data: Dict, 
                 callback: Optional[Callable] = None, retry_count: int = 0, 

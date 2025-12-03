@@ -1,8 +1,8 @@
 """RSA key decoder from MPI format."""
 from Crypto.PublicKey import RSA
-from utils.logger import setup_logger
+from megapy.core.logging import get_logger
 
-logger = setup_logger("RSA_helper", "DEBUG")
+logger = get_logger("RSA_helper")
 
 
 class RSAKeyDecoder:

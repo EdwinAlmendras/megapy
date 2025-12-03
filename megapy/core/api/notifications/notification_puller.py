@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 from typing import Optional
 from ..errors import MegaAPIError, APIErrorCodes
 from ..retry import RetryStrategy, ExponentialBackoffStrategy
-from utils.logger import setup_logger
+from megapy.core.logging import get_logger
 
 
 class NotificationPuller:
@@ -20,7 +20,7 @@ class NotificationPuller:
         self.session_manager = session_manager
         self.event_emitter = event_emitter
         self.retry_strategy = retry_strategy or ExponentialBackoffStrategy()
-        self.logger = setup_logger("NOTIFICATION_PULLER")
+        self.logger = get_logger("NOTIFICATION_PULLER")
         self._sn_task: Optional[threading.Thread] = None
         self.closed = False
     

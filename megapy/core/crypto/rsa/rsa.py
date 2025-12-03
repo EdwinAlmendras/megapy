@@ -1,9 +1,9 @@
 import math
 from Crypto.PublicKey import RSA
 from Crypto.Util.number import bytes_to_long
-from utils.logger import setup_logger
+from megapy.core.logging import get_logger
 
-logger = setup_logger("RSA_helper", "DEBUG")
+logger = get_logger("RSA_helper")
 
 # Tamaño de limb (solo por consistencia, no lo usamos aquí)
 bs = 28

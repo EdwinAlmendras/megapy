@@ -1,7 +1,5 @@
 """Event emitter implementation using Observer Pattern."""
 from typing import Dict, List, Callable, Optional
-from utils.logger import setup_logger
-
 
 class EventEmitter:
     """Event emitter using Observer Pattern."""
@@ -9,7 +7,6 @@ class EventEmitter:
     def __init__(self, logger_name: str = "EVENT_EMITTER"):
         """Initializes event emitter."""
         self._events: Dict[str, List[Callable]] = {}
-        self.logger = setup_logger(logger_name)
     
     def on(self, event: str, callback: Callable) -> 'EventEmitter':
         """Registers an event handler."""

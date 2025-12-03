@@ -7,7 +7,7 @@ from ..session import SessionManager
 from ..request import RequestHandler, RequestBuilder
 from ..notifications import NotificationPuller
 from ..errors import MegaAPIError
-from utils.logger import setup_logger
+from megapy.core.logging import get_logger
 
 
 class APIClient(EventEmitter):
@@ -36,8 +36,7 @@ class APIClient(EventEmitter):
         self.sn: Optional[str] = None
         self.closed = False
         
-        level = options.get('level', logging.DEBUG)
-        self.logger = setup_logger("MEGA_API", level=level)
+        self.logger = get_logger("MEGA_API")
     
     @property
     def session_id(self) -> Optional[str]:
