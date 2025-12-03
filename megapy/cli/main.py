@@ -47,8 +47,7 @@ def login(
         client = MegaClient(str(session_path))
         
         try:
-            await client.connect()
-            await client.login(email, password)
+            await client.start(email, password)
             console.print(f"[green]Logged in as {email}[/green]")
             console.print(f"Session saved to: {session_path}.session")
         except Exception as e:
