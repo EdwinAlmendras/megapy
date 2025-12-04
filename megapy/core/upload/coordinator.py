@@ -269,9 +269,10 @@ class UploadCoordinator:
         total_bytes: int
     ) -> None:
         """
-        Upload all chunks sequentially.
+        Upload chunks with sequential encryption and parallel uploads.
         
-        CTR mode requires sequential processing for correct encryption.
+        CTR mode requires sequential encryption, but uploads can be parallel.
+        Uses up to 21 concurrent uploads for maximum throughput.
         """
         total = len(chunks)
         uploaded_bytes = 0
@@ -281,20 +282,48 @@ class UploadCoordinator:
             total_bytes=total_bytes
         )
         
+        # Max parallel uploads (same as mega_api)
+        max_parallel_uploads = 21
+        active_uploads: set = set()
+        chunks_completed = 0
+        
+        self._logger.info(f"Processing {total} chunks (sequential encrypt + parallel upload, max {max_parallel_uploads})")
+        
         for i, (start, end) in enumerate(chunks):
-            # Read chunk
+            # 1. Read chunk
             data = await self._file_reader.read_chunk(file_path, start, end)
             if not data:
                 raise ValueError(f"Failed to read chunk {i}")
             
-            # Encrypt chunk (must be sequential for CTR)
+            # 2. Encrypt chunk (must be sequential for CTR)
             encrypted = encryption.encrypt_chunk(i, data)
             
-            # Upload chunk
-            await uploader.upload_chunk(i, start, encrypted)
+            # 3. Start upload immediately (parallel)
+            upload_task = asyncio.create_task(
+                self._upload_chunk_task(uploader, i, start, encrypted)
+            )
+            active_uploads.add(upload_task)
+            upload_task.add_done_callback(active_uploads.discard)
+            
+            # Update progress tracking
+            uploaded_bytes += len(data)
+            
+            # 4. Control concurrent uploads
+            if len(active_uploads) >= max_parallel_uploads:
+                # Wait for at least one upload to complete before continuing
+                done, _ = await asyncio.wait(
+                    active_uploads,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    try:
+                        await task
+                        chunks_completed += 1
+                    except Exception as e:
+                        self._logger.error(f"Upload error: {e}")
+                        raise
             
             # Update progress
-            uploaded_bytes += len(data)
             progress.uploaded_chunks = i + 1
             progress.uploaded_bytes = uploaded_bytes
             
@@ -302,10 +331,39 @@ class UploadCoordinator:
             if self._progress_callback:
                 self._progress_callback(progress)
             
-            # Log progress
+            # Log progress periodically
             if (i + 1) % 10 == 0 or (i + 1) == total:
                 pct = progress.percentage
                 self._logger.info(f"Progress: {i + 1}/{total} ({pct:.1f}%)")
+        
+        # Wait for all remaining uploads to complete
+        if active_uploads:
+            self._logger.debug(f"Waiting for {len(active_uploads)} pending uploads...")
+            results = await asyncio.gather(*active_uploads, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    self._logger.error(f"Upload failed: {result}")
+                    raise result
+        
+        self._logger.info(f"Upload complete: {total} chunks processed")
+    
+    async def _upload_chunk_task(
+        self,
+        uploader: ChunkUploader,
+        index: int,
+        start: int,
+        encrypted_chunk: bytes
+    ) -> None:
+        """
+        Upload a single chunk (used as async task).
+        
+        Args:
+            uploader: Chunk uploader instance
+            index: Chunk index
+            start: Start position in file
+            encrypted_chunk: Encrypted chunk data
+        """
+        await uploader.upload_chunk(index, start, encrypted_chunk)
     
     def _extract_node_handle(self, response: Dict[str, Any]) -> str:
         """Extract node handle from API response."""
