@@ -9,7 +9,7 @@ Usage:
     ...     for node in root:
     ...         print(node)
 """
-from .client import MegaClient, UserInfo
+from .client import MegaClient, UserInfo, AccountInfo
 from .node import Node
 
 # Backward compatibility aliases
@@ -43,6 +43,7 @@ __all__ = [
     'MegaFile',  # Alias
     'MegaNode',  # Alias
     'UserInfo',
+    'AccountInfo',
     'SessionStorage',
     'SessionData',
     'SQLiteSession',

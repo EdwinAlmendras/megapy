@@ -56,6 +56,79 @@ class UserInfo:
         return (self.used_storage / self.total_storage) * 100
 
 
+@dataclass
+class AccountInfo:
+    """
+    MEGA account storage and bandwidth information.
+    
+    Attributes:
+        account_type: Account type (0=free, 1=pro1, 2=pro2, 3=pro3, 4=lite, 100=business)
+        space_used: Storage used in bytes
+        space_total: Total storage in bytes
+        download_bandwidth_used: Download bandwidth used in bytes
+        download_bandwidth_total: Total download bandwidth (default 10PB for pro)
+        shared_bandwidth_used: Shared bandwidth used
+        shared_bandwidth_limit: Shared bandwidth ratio limit
+    """
+    account_type: int
+    space_used: int
+    space_total: int
+    download_bandwidth_used: int = 0
+    download_bandwidth_total: int = 0
+    shared_bandwidth_used: int = 0
+    shared_bandwidth_limit: float = 0.0
+    
+    @property
+    def space_free(self) -> int:
+        """Free storage space in bytes."""
+        return max(0, self.space_total - self.space_used)
+    
+    @property
+    def space_used_percent(self) -> float:
+        """Storage usage percentage."""
+        if self.space_total == 0:
+            return 0.0
+        return (self.space_used / self.space_total) * 100
+    
+    @property
+    def space_free_gb(self) -> float:
+        """Free storage in GB."""
+        return self.space_free / (1024 ** 3)
+    
+    @property
+    def space_used_gb(self) -> float:
+        """Used storage in GB."""
+        return self.space_used / (1024 ** 3)
+    
+    @property
+    def space_total_gb(self) -> float:
+        """Total storage in GB."""
+        return self.space_total / (1024 ** 3)
+    
+    @property
+    def is_free_account(self) -> bool:
+        """Check if this is a free account."""
+        return self.account_type == 0
+    
+    @property
+    def is_pro_account(self) -> bool:
+        """Check if this is a pro account."""
+        return self.account_type in (1, 2, 3, 4, 100)
+    
+    def has_space_for(self, file_size: int) -> bool:
+        """Check if account has enough space for a file."""
+        return self.space_free >= file_size
+    
+    def __str__(self) -> str:
+        type_names = {0: "Free", 1: "Pro I", 2: "Pro II", 3: "Pro III", 4: "Lite", 100: "Business"}
+        type_name = type_names.get(self.account_type, f"Unknown({self.account_type})")
+        return (
+            f"Account: {type_name}\n"
+            f"Storage: {self.space_used_gb:.2f} GB / {self.space_total_gb:.2f} GB "
+            f"({self.space_used_percent:.1f}% used, {self.space_free_gb:.2f} GB free)"
+        )
+
+
 class MegaClient:
     """
     High-level async client for MEGA with session support.
@@ -400,6 +473,48 @@ class MegaClient:
         if isinstance(self._session, SQLiteSession):
             return self._session.path
         return None
+    
+    async def get_account_info(self) -> AccountInfo:
+        """
+        Get account storage and bandwidth information.
+        
+        Queries MEGA API for current account status including:
+        - Storage used and total
+        - Download bandwidth used and limits
+        - Account type
+        
+        Returns:
+            AccountInfo with storage and bandwidth details
+            
+        Example:
+            >>> info = await mega.get_account_info()
+            >>> print(f"Free space: {info.space_free_gb:.2f} GB")
+            >>> if info.has_space_for(file_size):
+            ...     await mega.upload(file)
+        """
+        self._ensure_logged_in()
+        
+        # Request account quota info
+        # a=uq: user quota, strg=1: storage info, xfer=1: transfer info, pro=1: pro status
+        response = await self._api.request({
+            'a': 'uq',
+            'strg': 1,
+            'xfer': 1,
+            'pro': 1
+        })
+        
+        # Default bandwidth for pro accounts (10 PB)
+        default_bandwidth = (1024 ** 5) * 10
+        
+        return AccountInfo(
+            account_type=response.get('utype', 0),
+            space_used=response.get('cstrg', 0),
+            space_total=response.get('mstrg', 0),
+            download_bandwidth_used=response.get('caxfer', 0),
+            download_bandwidth_total=response.get('mxfer', default_bandwidth),
+            shared_bandwidth_used=response.get('csxfer', 0),
+            shared_bandwidth_limit=response.get('srvratio', 0)
+        )
     
     # =========================================================================
     # Properties (Clean API)

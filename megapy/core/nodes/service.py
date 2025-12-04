@@ -95,7 +95,6 @@ class NodeService:
             
             # Decrypt attributes
             attrs = self._decryptor.decrypt_attributes(data, key)
-            print(attrs)
             name = attrs.get('n', handle)
             
             # Handle root folder
