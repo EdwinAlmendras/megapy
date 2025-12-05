@@ -5,6 +5,7 @@ Single Responsibility: Each class handles one specific task.
 """
 from pathlib import Path
 from typing import Tuple, Optional, Union
+import logging
 import aiofiles
 
 
@@ -71,6 +72,10 @@ class AsyncFileReader:
     Uses aiofiles for non-blocking I/O operations.
     """
     
+    def __init__(self):
+        """Initialize file reader."""
+        self._logger = logging.getLogger('megapy.upload.file')
+    
     async def read_chunk(
         self,
         file_path: Path,
@@ -89,11 +94,15 @@ class AsyncFileReader:
             Chunk data or None if reading failed
         """
         try:
+            chunk_size = end - start
             async with aiofiles.open(file_path, 'rb') as f:
                 await f.seek(start)
-                data = await f.read(end - start)
+                data = await f.read(chunk_size)
+                if data:
+                    self._logger.debug(f"Read chunk: {start}-{end} ({len(data)} bytes)")
                 return data if data else None
-        except (IOError, OSError):
+        except (IOError, OSError) as e:
+            self._logger.error(f"Failed to read chunk {start}-{end}: {e}")
             return None
     
     async def read_file(self, file_path: Path) -> Optional[bytes]:

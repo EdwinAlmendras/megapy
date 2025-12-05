@@ -4,6 +4,9 @@ Chunk upload service.
 Handles uploading individual chunks to MEGA servers.
 """
 from typing import Optional
+import logging
+import time
+import asyncio
 import aiohttp
 
 
@@ -40,6 +43,7 @@ class ChunkUploader:
         self._upload_token: Optional[str] = None
         self._session = session
         self._owns_session = False
+        self._logger = logging.getLogger('megapy.upload.chunk')
     
     @property
     def upload_url(self) -> str:
@@ -85,20 +89,37 @@ class ChunkUploader:
         if not encrypted_chunk:
             raise ValueError(f"Cannot upload empty chunk {chunk_index}")
         
+        chunk_size_kb = len(encrypted_chunk) / 1024
         url = f"{self._upload_url}/{start_position}"
         headers = {"Content-Length": str(len(encrypted_chunk))}
         session = await self._get_session()
         
-        async with session.post(
-            url,
-            data=encrypted_chunk,
-            headers=headers,
-            ssl=False,
-            timeout=aiohttp.ClientTimeout(total=self._timeout)
-        ) as response:
-            response.raise_for_status()
-            response_text = await response.text()
-            return self._process_response(response_text, chunk_index)
+        upload_start = time.time()
+        self._logger.debug(f"Uploading chunk {chunk_index} at position {start_position} ({chunk_size_kb:.1f} KB)")
+        
+        try:
+            async with session.post(
+                url,
+                data=encrypted_chunk,
+                headers=headers,
+                ssl=False,
+                timeout=aiohttp.ClientTimeout(total=self._timeout, connect=10)
+            ) as response:
+                response.raise_for_status()
+                response_text = await response.text()
+                result = self._process_response(response_text, chunk_index)
+                upload_time = time.time() - upload_start
+                speed_kbps = (chunk_size_kb / upload_time) if upload_time > 0 else 0
+                self._logger.debug(f"Chunk {chunk_index} uploaded successfully in {upload_time:.2f}s ({speed_kbps:.1f} KB/s)")
+                return result
+        except asyncio.TimeoutError:
+            upload_time = time.time() - upload_start
+            self._logger.error(f"Chunk {chunk_index} upload timeout after {upload_time:.2f}s (timeout={self._timeout}s)")
+            raise
+        except Exception as e:
+            upload_time = time.time() - upload_start
+            self._logger.error(f"Chunk {chunk_index} upload failed after {upload_time:.2f}s: {e}")
+            raise
     
     def _process_response(self, response_text: str, chunk_index: int) -> str:
         """
@@ -118,6 +139,7 @@ class ChunkUploader:
         try:
             error_code = int(response_text)
             if error_code < 0:
+                self._logger.error(f"Server returned error {error_code} for chunk {chunk_index}")
                 raise ValueError(
                     f"Server error {error_code} uploading chunk {chunk_index}"
                 )

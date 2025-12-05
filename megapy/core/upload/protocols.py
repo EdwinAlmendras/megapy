@@ -158,13 +158,6 @@ class NodeCreatorProtocol(Protocol):
         ...
 
 
-class ApiClientProtocol(Protocol):
-    """Protocol for MEGA API client."""
-    
-    def request(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Make a request to MEGA API."""
-        ...
-
 
 class LoggerProtocol(Protocol):
     """Protocol for logger objects."""

@@ -10,7 +10,7 @@ import logging
 
 from .coordinator import UploadCoordinator
 from .models import UploadConfig, UploadResult, FileAttributes
-from .protocols import ApiClientProtocol, ChunkingStrategy, EncryptionStrategy
+from .protocols import ChunkingStrategy, EncryptionStrategy
 
 
 class UploadFacade:
@@ -29,7 +29,7 @@ class UploadFacade:
     
     def __init__(
         self,
-        api_client: ApiClientProtocol,
+        api_client,
         master_key: bytes,
         chunking_strategy: Optional[ChunkingStrategy] = None,
         encryption_strategy: Optional[EncryptionStrategy] = None,

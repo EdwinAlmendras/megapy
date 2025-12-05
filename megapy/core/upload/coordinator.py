@@ -7,6 +7,7 @@ Follows Dependency Inversion Principle - depends on abstractions, not concretion
 import logging
 import asyncio
 import aiohttp
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Callable
 from Crypto.Cipher import AES
@@ -15,15 +16,15 @@ from .protocols import (
     ChunkingStrategy,
     EncryptionStrategy,
     FileReaderProtocol,
-    ChunkUploaderProtocol,
-    NodeCreatorProtocol,
-    ApiClientProtocol,
     LoggerProtocol
 )
 from .models import UploadConfig, UploadResult, UploadProgress, FileAttributes
 from .strategies import MegaChunkingStrategy, MegaEncryptionStrategy
 from .services import FileValidator, AsyncFileReader, ChunkUploader, NodeCreator
 from ..crypto import Base64Encoder
+import logging
+
+logger = logging.getLogger('megapy.upload.coordinator')
 
 
 class UploadCoordinator:
@@ -40,7 +41,7 @@ class UploadCoordinator:
     
     def __init__(
         self,
-        api_client: ApiClientProtocol,
+        api_client,
         master_key: bytes,
         chunking_strategy: Optional[ChunkingStrategy] = None,
         encryption_strategy: Optional[EncryptionStrategy] = None,
@@ -65,7 +66,6 @@ class UploadCoordinator:
         self._chunking = chunking_strategy or MegaChunkingStrategy()
         self._file_reader = file_reader or AsyncFileReader()
         self._validator = FileValidator()
-        self._logger = logger or logging.getLogger('megapy.upload')
         self._progress_callback = progress_callback
         
         # Encryption strategy can be set per-upload
@@ -85,11 +85,12 @@ class UploadCoordinator:
             FileNotFoundError: If file doesn't exist
             ValueError: If upload fails
         """
-        self._logger.info(f"Starting upload: {config.file_path}")
+        path, file_size = self._validator.validate(config.file_path)
+        file_size_mb = file_size / (1024 * 1024)
+        logger.info(f"Starting upload: {path.name} ({file_size_mb:.2f} MB)")
         
         # Step 1: Validate file
-        path, file_size = self._validator.validate(config.file_path)
-        self._logger.debug(f"File validated: {file_size} bytes")
+        logger.debug(f"File validated: {file_size} bytes")
         
         # Step 1.5: Set modification time from file if not provided
         # This preserves the original file's mtime, matching MEGA web client behavior
@@ -97,30 +98,33 @@ class UploadCoordinator:
             try:
                 file_mtime = int(path.stat().st_mtime)
                 config.attributes.mtime = file_mtime
-                self._logger.debug(f"File mtime set: {file_mtime}")
+                logger.debug(f"File mtime set: {file_mtime}")
             except (OSError, AttributeError) as e:
-                self._logger.debug(f"Could not get file mtime: {e}")
+                logger.debug(f"Could not get file mtime: {e}")
         
-        # Step 2: Get upload URL
+        logger.info("Requesting upload URL from MEGA API")
         upload_url = await self._get_upload_url(file_size)
-        self._logger.debug(f"Upload URL obtained")
         
-        # Step 3: Initialize components
         encryption = self._create_encryption(config.encryption_key)
         chunk_uploader = ChunkUploader(upload_url, config.timeout)
         node_creator = NodeCreator(self._api, self._master_key)
         
         # Step 4: Calculate chunks
         chunks = self._chunking.calculate_chunks(file_size)
-        self._logger.info(f"File split into {len(chunks)} chunks")
+        avg_chunk_size = file_size / len(chunks) if chunks else 0
+        avg_chunk_size_kb = avg_chunk_size / 1024
+        logger.info(f"File split into {len(chunks)} chunks (avg {avg_chunk_size_kb:.1f} KB per chunk)")
         
         # Step 5: Upload chunks
+        logger.info("Beginning chunk upload process")
+        chunks_start = time.time()
         try:
             await self._upload_chunks(
                 path, chunks, encryption, chunk_uploader, file_size
             )
         finally:
             await chunk_uploader.close()
+            logger.debug("Upload session closed")
         
         # Step 6: Get original key (24 bytes) for thumbnail encryption
         # and finalize to get the 32-byte file key for node creation
@@ -131,28 +135,75 @@ class UploadCoordinator:
         if not upload_token:
             raise ValueError("No upload token received")
         
-        # Step 7: Upload thumbnail and preview (if provided)
+        # Step 7: Upload thumbnail and preview (if provided) in parallel
         # Use first 16 bytes of ORIGINAL key (not file_key) for encryption
         file_attributes = []
+        
+        # Upload thumbnail and preview sequentially (not in parallel)
+        attrs_start = time.time()
+        
+        
+        
+        # Upload thumbnail first
         if config.thumbnail:
+            thumb_size_kb = len(config.thumbnail) / 1024
+            logger.info(f"Uploading thumbnail ({thumb_size_kb:.1f} KB)")
             try:
                 thumb_hash = await self._upload_file_attribute(config.thumbnail, original_key[:16], 0)
                 if thumb_hash:
                     file_attributes.append(f"0*{thumb_hash}")
-                    self._logger.debug("Thumbnail uploaded")
+                    logger.info("Thumbnail uploaded successfully")
+                else:
+                    logger.warning("Failed to upload thumbnail: no hash returned")
             except Exception as e:
-                self._logger.warning(f"Failed to upload thumbnail: {e}")
+                logger.warning(f"Failed to upload thumbnail: {e}")
         
+        # Upload preview second (after thumbnail completes)
+        # Skip preview if largest side is less than 1024px
         if config.preview:
+            preview_size_kb = len(config.preview) / 1024
+            
+            # Check preview dimensions
             try:
-                preview_hash = await self._upload_file_attribute(config.preview, original_key[:16], 1)
-                if preview_hash:
-                    file_attributes.append(f"1*{preview_hash}")
-                    self._logger.debug("Preview uploaded")
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(config.preview))
+                width, height = img.size
+                max_dimension = max(width, height)
+                
+                if max_dimension < 1024:
+                    logger.info(f"Skipping preview upload: largest side is {max_dimension}px (less than 1024px)")
+                else:
+                    logger.info(f"Uploading preview ({preview_size_kb:.1f} KB, {width}x{height}px)")
+                    try:
+                        preview_hash = await self._upload_file_attribute(config.preview, original_key[:16], 1)
+                        if preview_hash:
+                            file_attributes.append(f"1*{preview_hash}")
+                            logger.info("Preview uploaded successfully")
+                        else:
+                            logger.warning("Failed to upload preview: no hash returned")
+                    except Exception as e:
+                        logger.warning(f"Failed to upload preview: {e}")
             except Exception as e:
-                self._logger.warning(f"Failed to upload preview: {e}")
+                # If we can't read dimensions, upload anyway (fallback)
+                logger.warning(f"Could not read preview dimensions, uploading anyway: {e}")
+                try:
+                    preview_hash = await self._upload_file_attribute(config.preview, original_key[:16], 1)
+                    if preview_hash:
+                        file_attributes.append(f"1*{preview_hash}")
+                        logger.info("Preview uploaded successfully")
+                    else:
+                        logger.warning("Failed to upload preview: no hash returned")
+                except Exception as upload_error:
+                    logger.warning(f"Failed to upload preview: {upload_error}")
+        
+        if config.thumbnail or config.preview:
+            attrs_time = time.time() - attrs_start
+            logger.info(f"File attributes upload completed in {attrs_time:.2f}s")
         
         # Step 8: Create node
+        logger.info("Creating file node in MEGA")
+        node_start = time.time()
         attributes = config.attributes.to_dict() if config.attributes else {'n': path.name}
         fa_string = '/'.join(file_attributes) if file_attributes else None
         
@@ -167,16 +218,17 @@ class UploadCoordinator:
         
         # Extract node handle from response
         node_handle = self._extract_node_handle(response)
+        node_time = time.time() - node_start
+        logger.info(f"File node created in {node_time:.2f}s: {node_handle}")
         
         # Step 9: Upload media attributes if provided (for video/audio files)
         if config.media_info:
             try:
+                logger.info("Uploading media attributes")
                 await self._upload_media_attributes(node_handle, config.media_info, file_key)
-                self._logger.debug("Media attributes uploaded")
+                logger.info("Media attributes uploaded successfully")
             except Exception as e:
-                self._logger.warning(f"Failed to upload media attributes: {e}")
-        
-        self._logger.info(f"Upload complete: {node_handle}")
+                logger.warning(f"Failed to upload media attributes: {e}")
         
         return UploadResult(
             node_handle=node_handle,
@@ -203,6 +255,10 @@ class UploadCoordinator:
         Returns:
             Attribute hash or None
         """
+        attr_name = "thumbnail" if attr_type == 0 else "preview"
+        data_size_kb = len(data) / 1024
+        logger.debug(f"Preparing {attr_name} upload ({data_size_kb:.1f} KB)")
+        
         # Pad to 16-byte boundary
         padded_len = (len(data) + 15) // 16 * 16
         padded_data = data + b'\x00' * (padded_len - len(data))
@@ -211,44 +267,45 @@ class UploadCoordinator:
         cipher = AES.new(aes_key, AES.MODE_CBC, iv=b'\x00' * 16)
         encrypted = cipher.encrypt(padded_data)
         
-        # Get upload URL for file attribute
         result = await self._api.request({'a': 'ufa', 's': len(encrypted)})
-        if 'p' not in result:
-            return None
         
         upload_url = result['p']
         
-        # Upload the encrypted data
-        # POST to /{attr_type}: 0 for thumbnail, 1 for preview
         encoder = Base64Encoder()
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30, force_close=False)
+        timeout = aiohttp.ClientTimeout(total=60, connect=10)
+        
+        upload_start = time.time()
+        
+        
+        logger.debug(f"Uploading {attr_name} to {upload_url}/{attr_type}")
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.post(
                 f"{upload_url}/{attr_type}",
                 data=encrypted,
-                headers={'Content-Type': 'application/octet-stream'}
+                headers={'Content-Type': 'application/octet-stream'},
+                ssl=False
             ) as resp:
+                if resp.status != 200:
+                    upload_time = time.time() - upload_start
+                    logger.error(f"Failed to upload {attr_name}: HTTP {resp.status} after {upload_time:.2f}s")
+                    return None
                 response_bytes = await resp.read()
-                if resp.status == 200 and response_bytes:
-                    # Response is the handle - encode as base64
-                    return encoder.encode(response_bytes)
-        
-        return None
+                upload_time = time.time() - upload_start
+                if response_bytes:
+                    hash_result = encoder.encode(response_bytes)
+                    logger.debug(f"{attr_name} uploaded successfully in {upload_time:.2f}s")
+                    return hash_result
+                else:
+                    logger.error(f"No response data received for {attr_name} after {upload_time:.2f}s")
+                    return None
+        logger.debug(f"Uploaded {attr_name} to {upload_url}/{attr_type}")
+
     
     async def _get_upload_url(self, file_size: int) -> str:
         """Get upload URL from API."""
-        # Support both sync and async clients
-        if hasattr(self._api.request, '__call__'):
-            import inspect
-            if inspect.iscoroutinefunction(self._api.request):
-                result = await self._api.request({'a': 'u', 's': file_size})
-            else:
-                result = self._api.request({'a': 'u', 's': file_size})
-        else:
-            result = self._api.request({'a': 'u', 's': file_size})
-        
-        if 'p' not in result:
-            raise ValueError("Could not obtain upload URL")
-        
+        result = await self._api.request({'a': 'u', 's': file_size})
         return result['p']
     
     def _create_encryption(
@@ -287,20 +344,20 @@ class UploadCoordinator:
         active_uploads: set = set()
         chunks_completed = 0
         
-        self._logger.info(f"Processing {total} chunks (sequential encrypt + parallel upload, max {max_parallel_uploads})")
+        total_mb = total_bytes / (1024 * 1024)
+        logger.info(f"Processing {total} chunks ({total_mb:.2f} MB total, max {max_parallel_uploads} parallel uploads)")
         
         for i, (start, end) in enumerate(chunks):
+            chunk_start_time = time.time()
             # 1. Read chunk
             data = await self._file_reader.read_chunk(file_path, start, end)
             if not data:
                 raise ValueError(f"Failed to read chunk {i}")
             
-            # 2. Encrypt chunk (must be sequential for CTR)
             encrypted = encryption.encrypt_chunk(i, data)
             
-            # 3. Start upload immediately (parallel)
             upload_task = asyncio.create_task(
-                self._upload_chunk_task(uploader, i, start, encrypted)
+                self._upload_chunk_task(uploader, i, start, encrypted, chunk_start_time)
             )
             active_uploads.add(upload_task)
             upload_task.add_done_callback(active_uploads.discard)
@@ -308,9 +365,7 @@ class UploadCoordinator:
             # Update progress tracking
             uploaded_bytes += len(data)
             
-            # 4. Control concurrent uploads
             if len(active_uploads) >= max_parallel_uploads:
-                # Wait for at least one upload to complete before continuing
                 done, _ = await asyncio.wait(
                     active_uploads,
                     return_when=asyncio.FIRST_COMPLETED
@@ -320,7 +375,7 @@ class UploadCoordinator:
                         await task
                         chunks_completed += 1
                     except Exception as e:
-                        self._logger.error(f"Upload error: {e}")
+                        logger.error(f"Chunk upload failed: chunk {i}, error: {e}")
                         raise
             
             # Update progress
@@ -331,28 +386,25 @@ class UploadCoordinator:
             if self._progress_callback:
                 self._progress_callback(progress)
             
-            # Log progress periodically
-            if (i + 1) % 10 == 0 or (i + 1) == total:
-                pct = progress.percentage
-                self._logger.info(f"Progress: {i + 1}/{total} ({pct:.1f}%)")
-        
-        # Wait for all remaining uploads to complete
         if active_uploads:
-            self._logger.debug(f"Waiting for {len(active_uploads)} pending uploads...")
+            remaining = len(active_uploads)
+            logger.info(f"Waiting for {remaining} remaining chunk uploads to complete")
             results = await asyncio.gather(*active_uploads, return_exceptions=True)
             for result in results:
                 if isinstance(result, Exception):
-                    self._logger.error(f"Upload failed: {result}")
+                    logger.error(f"Chunk upload failed: {result}")
                     raise result
         
-        self._logger.info(f"Upload complete: {total} chunks processed")
+        uploaded_mb = total_bytes / (1024 * 1024)
+        logger.info(f"All chunks uploaded successfully: {total} chunks, {uploaded_mb:.2f} MB")
     
     async def _upload_chunk_task(
         self,
         uploader: ChunkUploader,
         index: int,
         start: int,
-        encrypted_chunk: bytes
+        encrypted_chunk: bytes,
+        start_time: float
     ) -> None:
         """
         Upload a single chunk (used as async task).
@@ -362,8 +414,18 @@ class UploadCoordinator:
             index: Chunk index
             start: Start position in file
             encrypted_chunk: Encrypted chunk data
+            start_time: Start time for timing
         """
-        await uploader.upload_chunk(index, start, encrypted_chunk)
+        try:
+            await uploader.upload_chunk(index, start, encrypted_chunk)
+            elapsed = time.time() - start_time
+            chunk_size_kb = len(encrypted_chunk) / 1024
+            speed_kbps = (chunk_size_kb / elapsed) if elapsed > 0 else 0
+            logger.debug(f"Chunk {index} completed in {elapsed:.2f}s ({speed_kbps:.1f} KB/s)")
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"Chunk {index} failed after {elapsed:.2f}s: {e}")
+            raise
     
     def _extract_node_handle(self, response: Dict[str, Any]) -> str:
         """Extract node handle from API response."""
@@ -395,11 +457,11 @@ class UploadCoordinator:
         if not fa_string:
             return
         
-        # Use pfa command to add media attributes
-        result = await self._api.request({
-            'a': 'pfa',
-            'n': node_handle,
-            'fa': fa_string
-        })
+
+        await self._api.request({
+                'a': 'pfa',
+                'n': node_handle,
+                'fa': fa_string
+            })
         
-        self._logger.debug(f"Media attributes stored: {fa_string}")
+        logger.debug(f"Media attributes stored: {fa_string}")

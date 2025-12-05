@@ -3,9 +3,9 @@ Node creation service.
 
 Handles creating file nodes in MEGA after upload.
 """
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Optional
+import logging
 from ...crypto import Base64Encoder, AESCrypto
-from ..protocols import ApiClientProtocol
 
 
 class NodeCreator:
@@ -20,7 +20,7 @@ class NodeCreator:
     Supports both sync and async API clients.
     """
     
-    def __init__(self, api_client: ApiClientProtocol, master_key: bytes):
+    def __init__(self, api_client, master_key: bytes):
         """
         Initialize node creator.
         
@@ -31,6 +31,7 @@ class NodeCreator:
         self._api = api_client
         self._master_key = master_key
         self._encoder = Base64Encoder()
+        self._logger = logging.getLogger('megapy.upload.node')
     
     async def create_node(
         self,
@@ -38,8 +39,8 @@ class NodeCreator:
         target_id: str,
         file_key: bytes,
         attributes: Dict[str, Any],
-        file_attributes: str = None,
-        replace_handle: str = None
+        file_attributes: Optional[str] = None,
+        replace_handle: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Create a file node in MEGA.
@@ -62,6 +63,9 @@ class NodeCreator:
             upload_token, target_id, file_key, attributes, file_attributes, replace_handle
         )
         
+        file_name = attributes.get('n', 'unknown')
+        self._logger.debug(f"Creating node for file: {file_name}")
+        
         # Support both sync and async clients
         if hasattr(self._api, '__aenter__') or hasattr(self._api.request, '__await__'):
             response = await self._api.request(node_data)
@@ -69,8 +73,10 @@ class NodeCreator:
             response = self._api.request(node_data)
         
         if not response or isinstance(response, int):
+            self._logger.error(f"Failed to create node: {response}")
             raise ValueError(f"Failed to create node: {response}")
         
+        self._logger.debug("Node created successfully")
         return response
     
     def _prepare_node_data(
@@ -79,8 +85,8 @@ class NodeCreator:
         target_id: str,
         file_key: bytes,
         attributes: Dict[str, Any],
-        file_attributes: str = None,
-        replace_handle: str = None
+        file_attributes: Optional[str] = None,
+        replace_handle: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Prepare node data for API request.

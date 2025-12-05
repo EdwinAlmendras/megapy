@@ -5,6 +5,14 @@ from .events import EventEmitter
 from .config import APIConfig, ProxyConfig, SSLConfig, TimeoutConfig, RetryConfig
 from .async_client import AsyncAPIClient
 from .async_auth import AsyncAuthService, AuthResult
+from .registration import (
+    AccountRegistrationBase,
+    StandardAccountRegistration,
+    BusinessAccountRegistration,
+    EphemeralAccountCreator,
+    RegistrationData,
+    RegistrationResult
+)
 
 # Backward compatibility
 MegaApi = APIClient
@@ -19,6 +27,14 @@ __all__ = [
     'AsyncAPIClient',
     'AsyncAuthService',
     'AuthResult',
+    
+    # Registration
+    'AccountRegistrationBase',
+    'StandardAccountRegistration',
+    'BusinessAccountRegistration',
+    'EphemeralAccountCreator',
+    'RegistrationData',
+    'RegistrationResult',
     
     # Configuration
     'APIConfig',

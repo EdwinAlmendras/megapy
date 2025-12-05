@@ -154,7 +154,7 @@ class MegaClient:
     
     def __init__(
         self,
-        session: Union[str, SessionStorage],
+        session: Optional[Union[str, SessionStorage]] = None,
         api_id: Optional[str] = None,  # Second arg = password for backward compat
         *,
         config: Optional[APIConfig] = None,
@@ -176,7 +176,13 @@ class MegaClient:
         self._logger = logging.getLogger('megapy.client')
         
         # Determine mode based on arguments
-        if api_id is not None:
+        if session is None:
+            # No session provided - use memory session (for registration, etc.)
+            self._email: Optional[str] = None
+            self._password: Optional[str] = None
+            self._session: SessionStorage = MemorySession()
+            self._session_mode = False
+        elif api_id is not None:
             # Backward compatible: MegaClient(email, password)
             self._email = session
             self._password = api_id
@@ -423,12 +429,16 @@ class MegaClient:
         """Enter async context - connects and logs in."""
         if self._session_mode:
             await self.start()
-        else:
+        elif self._email and self._password:
             # Direct credentials mode
             self._api = AsyncAPIClient(self._config)
             await self._api.__aenter__()
             self._auth = AsyncAuthService(self._api)
             await self._do_login()
+        else:
+            # No credentials - just initialize API (for registration, etc.)
+            self._api = AsyncAPIClient(self._config)
+            await self._api.__aenter__()
         
         return self
     
@@ -792,20 +802,28 @@ class MegaClient:
             from .core.attributes import MediaProcessor
             processor = MediaProcessor()
             if processor.is_media(path):
+                self._logger.info("Generating thumbnail and preview for media file")
                 result = await processor.process(path)
                 if thumb_data is None:
                     thumb_data = result.thumbnail
+                    if thumb_data:
+                        self._logger.debug("Thumbnail generated successfully")
                 if preview_data is None:
                     preview_data = result.preview
+                    if preview_data:
+                        self._logger.debug("Preview generated successfully")
         
         # Always extract media attributes for videos (independent of auto_thumb)
         try:
             from .core.attributes import MediaProcessor
             processor = MediaProcessor()
             if processor.is_video(path):
+                self._logger.info("Extracting media metadata for video file")
                 media_info = processor.extract_metadata(path)
-        except Exception:
-            pass
+                if media_info:
+                    self._logger.debug("Media metadata extracted successfully")
+        except Exception as e:
+            self._logger.debug(f"Could not extract media metadata: {e}")
         
         coordinator = UploadCoordinator(
             api_client=self._api,
@@ -837,6 +855,9 @@ class MegaClient:
         # Add to node service cache
         if self._node_service:
             self._node_service.nodes[result.node_handle] = node
+        
+        file_size_mb = result.file_size / (1024 * 1024)
+        self._logger.info(f"Upload finished successfully: {path.name} -> {result.node_handle} ({file_size_mb:.2f} MB)")
         
         return node
     
@@ -1323,6 +1344,135 @@ class MegaClient:
             return node
         
         raise ValueError("Failed to create folder")
+    
+    async def import_folder(
+        self,
+        source_folder: Union[str, MegaFile],
+        target_folder: Union[str, MegaFile],
+        clear_attributes: bool = True
+    ) -> List[Node]:
+        """
+        Import a folder with all its children to target folder.
+        
+        This creates a copy of the source folder and all its contents
+        in the target location. Based on webclient's folder import logic.
+        
+        Args:
+            source_folder: Source folder to import (handle, path, or Node)
+            target_folder: Target folder where to import (handle, path, or Node)
+            clear_attributes: If True, clear sensitive attributes (s4, lbl, fav, sen)
+            
+        Returns:
+            List of imported Node objects
+            
+        Example:
+            >>> source = await mega.find("Documents")
+            >>> target = await mega.find("Backups")
+            >>> imported = await mega.import_folder(source, target)
+            >>> print(f"Imported {len(imported)} nodes")
+        """
+        self._ensure_logged_in()
+        
+        if self._node_service is None:
+            await self._load_nodes()
+        
+        # Resolve source folder
+        source = await self._resolve_file(source_folder)
+        if not source:
+            raise FileNotFoundError(f"Source folder not found: {source_folder}")
+        
+        if not source.is_folder:
+            raise ValueError(f"Source must be a folder, got: {source.handle}")
+        
+        # Resolve target folder
+        target = await self._resolve_file(target_folder)
+        if not target:
+            raise FileNotFoundError(f"Target folder not found: {target_folder}")
+        
+        if not target.is_folder:
+            raise ValueError(f"Target must be a folder, got: {target.handle}")
+        
+        # Import using FolderImporter
+        from .core.nodes.folder_importer import FolderImporter
+        
+        importer = FolderImporter(
+            master_key=self._master_key,
+            api_client=self._api,
+            node_service=self._node_service
+        )
+        
+        # Execute import
+        handles = await importer.import_folder(
+            source_folder=source,
+            target_folder_handle=target.handle,
+            clear_attributes=clear_attributes
+        )
+        
+        # Reload nodes to get the new imported nodes
+        await self._load_nodes()
+        
+        # Return imported nodes
+        imported_nodes = []
+        for handle in handles:
+            node = self._node_service.get(handle)
+            if node:
+                imported_nodes.append(node)
+        
+        return imported_nodes
+    
+    async def register(
+        self,
+        email: str,
+        password: str,
+        first_name: str,
+        last_name: str
+    ):
+        """
+        Register a new MEGA account.
+        
+        This creates a new account and sends a confirmation email.
+        The user must confirm their email before the account is fully activated.
+        
+        Args:
+            email: User email address
+            password: User password
+            first_name: User's first name
+            last_name: User's last name
+            
+        Returns:
+            RegistrationResult with success status and message
+            
+        Example:
+            >>> async with MegaClient() as mega:
+            ...     result = await mega.register(
+            ...         email="user@example.com",
+            ...         password="secure_password",
+            ...         first_name="John",
+            ...         last_name="Doe"
+            ...     )
+            ...     if result.success:
+            ...         print("Check your email for confirmation")
+        """
+        from .core.api.registration import StandardAccountRegistration, RegistrationData
+        
+        # Initialize API client if not already done
+        if self._api is None:
+            self._api = AsyncAPIClient(self._config)
+            await self._api.__aenter__()
+        
+        # Create registration handler
+        registration = StandardAccountRegistration(self._api)
+        
+        # Prepare registration data
+        data = RegistrationData(
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name
+        )
+        
+        # Execute registration
+        return await registration.register(data)
     
     # =========================================================================
     # Private helpers
