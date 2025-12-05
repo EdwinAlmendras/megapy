@@ -316,6 +316,8 @@ class UploadCoordinator:
         
         if 'p' not in result:
             raise ValueError("Could not obtain upload URL")
+        
+        return result['p']
     
     def _create_encryption(
         self, 
