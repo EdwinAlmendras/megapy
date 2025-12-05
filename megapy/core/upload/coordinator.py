@@ -342,8 +342,9 @@ class UploadCoordinator:
         CTR mode requires sequential encryption, but uploads can be parallel.
         Uses up to 21 concurrent uploads for maximum throughput.
         
-        Optimized for memory: Opens file once, reads chunks on-demand, and
-        explicitly releases data references after encryption to minimize RAM usage.
+        Optimized for memory: Opens file once, reads chunks on-demand only when
+        there's space available, and explicitly releases data references to minimize RAM usage.
+        This prevents memory accumulation that could cause OOM kills on large files.
         """
         total = len(chunks)
         uploaded_bytes = 0
@@ -357,6 +358,7 @@ class UploadCoordinator:
         max_parallel_uploads = 21
         active_uploads: set = set()
         chunks_completed = 0
+        chunk_index = 0  # Track which chunk we're processing
         
         total_mb = total_bytes / (1024 * 1024)
         logger.info(f"Processing {total} chunks ({total_mb:.2f} MB total, max {max_parallel_uploads} parallel uploads)")
@@ -368,45 +370,55 @@ class UploadCoordinator:
             if has_file_management:
                 await self._file_reader.open_file(file_path)
             
-            for i, (start, end) in enumerate(chunks):
-                chunk_start_time = time.time()
-                # 1. Read chunk (reuses open file handle)
-                data = await self._file_reader.read_chunk(file_path, start, end)
-                if not data:
-                    raise ValueError(f"Failed to read chunk {i}")
+            # Process chunks: only read/encrypt when we have space for upload
+            while chunk_index < total or active_uploads:
+                # Read and encrypt chunks only when we have space
+                while chunk_index < total and len(active_uploads) < max_parallel_uploads:
+                    i, (start, end) = chunk_index, chunks[chunk_index]
+                    chunk_start_time = time.time()
+                    
+                    # 1. Read chunk (reuses open file handle)
+                    data = await self._file_reader.read_chunk(file_path, start, end)
+                    if not data:
+                        raise ValueError(f"Failed to read chunk {i}")
+                    
+                    # 2. Encrypt chunk
+                    encrypted = encryption.encrypt_chunk(i, data)
+                    
+                    # 3. Explicitly release reference to unencrypted data immediately
+                    # This is critical to prevent memory accumulation
+                    del data
+                    
+                    # 4. Create upload task
+                    upload_task = asyncio.create_task(
+                        self._upload_chunk_task(uploader, i, start, encrypted, chunk_start_time)
+                    )
+                    active_uploads.add(upload_task)
+                    
+                    # 5. Add callback to remove from active set when done
+                    def make_cleanup(task_ref):
+                        def cleanup(_):
+                            active_uploads.discard(task_ref)
+                        return cleanup
+                    
+                    upload_task.add_done_callback(make_cleanup(upload_task))
+                    
+                    # Update progress tracking (track original file bytes)
+                    chunk_original_size = end - start
+                    uploaded_bytes += chunk_original_size
+                    chunk_index += 1
+                    
+                    # Update progress
+                    progress.uploaded_chunks = chunk_index
+                    progress.uploaded_bytes = uploaded_bytes
+                    
+                    # Callback if provided
+                    if self._progress_callback:
+                        self._progress_callback(progress)
                 
-                # 2. Encrypt chunk
-                encrypted = encryption.encrypt_chunk(i, data)
-                
-                # 3. Explicitly release reference to unencrypted data to free memory
-                # The encrypted data will be released after upload completes
-                del data
-                
-                # 4. Create upload task with cleanup callback
-                # The callback will release the encrypted data from memory after upload
-                # Capture encrypted data in closure for cleanup
-                enc_data_ref = [encrypted]  # Use list to allow modification in callback
-                upload_task = asyncio.create_task(
-                    self._upload_chunk_task(uploader, i, start, encrypted, chunk_start_time)
-                )
-                
-                def cleanup_callback(finished_task):
-                    # Release encrypted chunk data from memory after upload completes
-                    # This helps free RAM, especially important for large files
-                    if enc_data_ref:
-                        del enc_data_ref[0]
-                        enc_data_ref.clear()
-                    active_uploads.discard(finished_task)
-                
-                upload_task.add_done_callback(cleanup_callback)
-                active_uploads.add(upload_task)
-                
-                # Update progress tracking (track original file bytes, not encrypted)
-                chunk_original_size = end - start
-                uploaded_bytes += chunk_original_size
-                
-                # Wait if we've reached max parallel uploads
-                if len(active_uploads) >= max_parallel_uploads:
+                # Wait for at least one upload to complete before reading more chunks
+                # This ensures we don't accumulate too many chunks in memory
+                if active_uploads:
                     done, _ = await asyncio.wait(
                         active_uploads,
                         return_when=asyncio.FIRST_COMPLETED
@@ -416,33 +428,17 @@ class UploadCoordinator:
                             await task
                             chunks_completed += 1
                         except Exception as e:
-                            logger.error(f"Chunk upload failed: chunk {i}, error: {e}")
+                            logger.error(f"Chunk upload failed: {e}")
                             raise
-                
-                # Update progress
-                progress.uploaded_chunks = i + 1
-                progress.uploaded_bytes = uploaded_bytes
-                
-                # Callback if provided
-                if self._progress_callback:
-                    self._progress_callback(progress)
             
-            # Wait for remaining uploads to complete
-            if active_uploads:
-                remaining = len(active_uploads)
-                logger.info(f"Waiting for {remaining} remaining chunk uploads to complete")
-                results = await asyncio.gather(*active_uploads, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Chunk upload failed: {result}")
-                        raise result
+            # All chunks processed and uploaded
+            uploaded_mb = total_bytes / (1024 * 1024)
+            logger.info(f"All chunks uploaded successfully: {total} chunks, {uploaded_mb:.2f} MB")
+            
         finally:
             # Always close the file handle if it was opened
             if has_file_management:
                 await self._file_reader.close_file()
-        
-        uploaded_mb = total_bytes / (1024 * 1024)
-        logger.info(f"All chunks uploaded successfully: {total} chunks, {uploaded_mb:.2f} MB")
     
     async def _upload_chunk_task(
         self,
