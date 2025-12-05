@@ -341,6 +341,9 @@ class UploadCoordinator:
         
         CTR mode requires sequential encryption, but uploads can be parallel.
         Uses up to 21 concurrent uploads for maximum throughput.
+        
+        Optimized for memory: Opens file once, reads chunks on-demand, and
+        explicitly releases data references after encryption to minimize RAM usage.
         """
         total = len(chunks)
         uploaded_bytes = 0
@@ -358,53 +361,85 @@ class UploadCoordinator:
         total_mb = total_bytes / (1024 * 1024)
         logger.info(f"Processing {total} chunks ({total_mb:.2f} MB total, max {max_parallel_uploads} parallel uploads)")
         
-        for i, (start, end) in enumerate(chunks):
-            chunk_start_time = time.time()
-            # 1. Read chunk
-            data = await self._file_reader.read_chunk(file_path, start, end)
-            if not data:
-                raise ValueError(f"Failed to read chunk {i}")
+        # Open file once for efficient reading (avoids repeated open/close)
+        # Check if file_reader supports open_file/close_file (optional optimization)
+        has_file_management = hasattr(self._file_reader, 'open_file') and hasattr(self._file_reader, 'close_file')
+        try:
+            if has_file_management:
+                await self._file_reader.open_file(file_path)
             
-            encrypted = encryption.encrypt_chunk(i, data)
-            
-            upload_task = asyncio.create_task(
-                self._upload_chunk_task(uploader, i, start, encrypted, chunk_start_time)
-            )
-            active_uploads.add(upload_task)
-            upload_task.add_done_callback(active_uploads.discard)
-            
-            # Update progress tracking
-            uploaded_bytes += len(data)
-            
-            if len(active_uploads) >= max_parallel_uploads:
-                done, _ = await asyncio.wait(
-                    active_uploads,
-                    return_when=asyncio.FIRST_COMPLETED
+            for i, (start, end) in enumerate(chunks):
+                chunk_start_time = time.time()
+                # 1. Read chunk (reuses open file handle)
+                data = await self._file_reader.read_chunk(file_path, start, end)
+                if not data:
+                    raise ValueError(f"Failed to read chunk {i}")
+                
+                # 2. Encrypt chunk
+                encrypted = encryption.encrypt_chunk(i, data)
+                
+                # 3. Explicitly release reference to unencrypted data to free memory
+                # The encrypted data will be released after upload completes
+                del data
+                
+                # 4. Create upload task with cleanup callback
+                # The callback will release the encrypted data from memory after upload
+                # Capture encrypted data in closure for cleanup
+                enc_data_ref = [encrypted]  # Use list to allow modification in callback
+                upload_task = asyncio.create_task(
+                    self._upload_chunk_task(uploader, i, start, encrypted, chunk_start_time)
                 )
-                for task in done:
-                    try:
-                        await task
-                        chunks_completed += 1
-                    except Exception as e:
-                        logger.error(f"Chunk upload failed: chunk {i}, error: {e}")
-                        raise
+                
+                def cleanup_callback(finished_task):
+                    # Release encrypted chunk data from memory after upload completes
+                    # This helps free RAM, especially important for large files
+                    if enc_data_ref:
+                        del enc_data_ref[0]
+                        enc_data_ref.clear()
+                    active_uploads.discard(finished_task)
+                
+                upload_task.add_done_callback(cleanup_callback)
+                active_uploads.add(upload_task)
+                
+                # Update progress tracking (track original file bytes, not encrypted)
+                chunk_original_size = end - start
+                uploaded_bytes += chunk_original_size
+                
+                # Wait if we've reached max parallel uploads
+                if len(active_uploads) >= max_parallel_uploads:
+                    done, _ = await asyncio.wait(
+                        active_uploads,
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done:
+                        try:
+                            await task
+                            chunks_completed += 1
+                        except Exception as e:
+                            logger.error(f"Chunk upload failed: chunk {i}, error: {e}")
+                            raise
+                
+                # Update progress
+                progress.uploaded_chunks = i + 1
+                progress.uploaded_bytes = uploaded_bytes
+                
+                # Callback if provided
+                if self._progress_callback:
+                    self._progress_callback(progress)
             
-            # Update progress
-            progress.uploaded_chunks = i + 1
-            progress.uploaded_bytes = uploaded_bytes
-            
-            # Callback if provided
-            if self._progress_callback:
-                self._progress_callback(progress)
-            
-        if active_uploads:
-            remaining = len(active_uploads)
-            logger.info(f"Waiting for {remaining} remaining chunk uploads to complete")
-            results = await asyncio.gather(*active_uploads, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"Chunk upload failed: {result}")
-                    raise result
+            # Wait for remaining uploads to complete
+            if active_uploads:
+                remaining = len(active_uploads)
+                logger.info(f"Waiting for {remaining} remaining chunk uploads to complete")
+                results = await asyncio.gather(*active_uploads, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Chunk upload failed: {result}")
+                        raise result
+        finally:
+            # Always close the file handle if it was opened
+            if has_file_management:
+                await self._file_reader.close_file()
         
         uploaded_mb = total_bytes / (1024 * 1024)
         logger.info(f"All chunks uploaded successfully: {total} chunks, {uploaded_mb:.2f} MB")

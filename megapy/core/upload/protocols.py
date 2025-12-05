@@ -84,6 +84,19 @@ class FileReaderProtocol(Protocol):
             Chunk data or None if reading failed
         """
         ...
+    
+    async def open_file(self, file_path: Path) -> None:
+        """
+        Open file for reading. Optional method for optimization.
+        
+        Args:
+            file_path: Path to the file to open
+        """
+        ...
+    
+    async def close_file(self) -> None:
+        """Close the currently open file. Optional method for optimization."""
+        ...
 
 
 class FileValidatorProtocol(Protocol):
