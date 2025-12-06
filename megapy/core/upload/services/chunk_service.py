@@ -130,7 +130,7 @@ class ChunkUploader:
             chunk_index: Index of uploaded chunk
             
         Returns:
-            Upload token
+            Upload token (empty string for intermediate chunks, token for last chunk)
             
         Raises:
             ValueError: If response is an error code
@@ -149,7 +149,17 @@ class ChunkUploader:
                 raise
             # Otherwise it's not a number, likely a valid token
         
-        self._upload_token = response_text
+        # CRITICAL: Only update token if response is not empty
+        # MEGA returns empty string for intermediate chunks, and the token only for the last chunk
+        # Due to parallel uploads, intermediate chunks might complete after the last chunk,
+        # so we must not overwrite a valid token with an empty string
+        if response_text and response_text.strip():
+            self._upload_token = response_text
+            self._logger.debug(f"Upload token received from chunk {chunk_index}: {response_text[:20]}...")
+        else:
+            # Empty response for intermediate chunk - this is normal
+            self._logger.debug(f"Chunk {chunk_index} completed (intermediate chunk, no token)")
+        
         return response_text
     
     def get_upload_token(self) -> Optional[str]:

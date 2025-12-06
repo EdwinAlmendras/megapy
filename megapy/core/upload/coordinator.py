@@ -431,6 +431,19 @@ class UploadCoordinator:
                             logger.error(f"Chunk upload failed: {e}")
                             raise
             
+            # CRITICAL: Wait for ALL remaining uploads to complete before returning
+            # The upload token is only set when the last chunk completes
+            if active_uploads:
+                remaining = len(active_uploads)
+                logger.info(f"Waiting for {remaining} remaining chunk uploads to complete...")
+                results = await asyncio.gather(*active_uploads, return_exceptions=True)
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Chunk upload failed: {result}")
+                        raise result
+                chunks_completed += remaining
+                logger.debug(f"All {remaining} remaining chunks completed")
+            
             # All chunks processed and uploaded
             uploaded_mb = total_bytes / (1024 * 1024)
             logger.info(f"All chunks uploaded successfully: {total} chunks, {uploaded_mb:.2f} MB")
