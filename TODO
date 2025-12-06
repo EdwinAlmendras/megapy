@@ -21,4 +21,4 @@
 - [ ] Fix bug that dont uses codecs and more in AVI files why ? 
 
 - [ ] Improve video thumbnail extraction (better frame selection)
-
+- [ ] Import_link only wroks for folder url support for single files

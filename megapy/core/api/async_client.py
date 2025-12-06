@@ -54,8 +54,13 @@ class AsyncAPIClient:
         self._flush_delay = 0.35  # 350ms delay like webclient
         self._max_batch_size = 50  # Maximum requests per batch
         
-        self._logger = logging.getLogger('megapy.api')
-        self._logger.setLevel(self._config.log_level)
+        from ..logging import get_logger
+        self._logger = get_logger('megapy.api')
+        # Only set level if root logger has no handlers (basicConfig not called)
+        # Otherwise, let it inherit from root logger
+        root_logger = logging.getLogger()
+        if not root_logger.handlers:
+            self._logger.setLevel(self._config.log_level)
     
     @property
     def session_id(self) -> Optional[str]:
@@ -266,6 +271,7 @@ class AsyncAPIClient:
         body = json.dumps(requests)
         
         self._logger.debug(f"Batch request ({len(requests)} requests) to {url}")
+        self._logger.debug(f"Request data: {body}")
         
         try:
             async with session.post(
@@ -282,6 +288,7 @@ class AsyncAPIClient:
                     return await self._request_batch(requests, retry_count)
                 
                 response_text = await response.text()
+                self._logger.debug(f"Response data: {response_text[:1000] if len(response_text) > 1000 else response_text}")
                 results = self._parse_batch_response(response_text)
                 
                 # Check for errors and retry if needed
@@ -340,6 +347,7 @@ class AsyncAPIClient:
         body = json.dumps([data])
         
         self._logger.debug(f"Immediate request to {url}")
+        self._logger.debug(f"Request data: {body}")
         
         try:
             async with session.post(
@@ -355,6 +363,7 @@ class AsyncAPIClient:
                     return await self._request_immediate(data, retry_count)
                 
                 response_text = await response.text()
+                self._logger.debug(f"Response data: {response_text[:1000] if len(response_text) > 1000 else response_text}")
                 result = self._parse_response(response_text)
                 
                 # Handle errors with retry

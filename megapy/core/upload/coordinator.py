@@ -121,6 +121,10 @@ class UploadCoordinator:
             await self._upload_chunks(
                 path, chunks, encryption, chunk_uploader, file_size
             )
+            logger.info("Chunk upload process completed")
+        except Exception as e:
+            logger.error(f"Error during chunk upload: {e}", exc_info=True)
+            raise
         finally:
             await chunk_uploader.close()
             logger.debug("Upload session closed")
@@ -129,10 +133,15 @@ class UploadCoordinator:
         # and finalize to get the 32-byte file key for node creation
         original_key = encryption.key  # 24 bytes - used for thumbnails
         file_key = encryption.finalize()  # 32 bytes - used for node creation
+        
+        # Get upload token - CRITICAL: must be set after all chunks complete
         upload_token = chunk_uploader.get_upload_token()
+        logger.debug(f"Upload token after chunk upload: {upload_token[:20] if upload_token else 'None'}...")
         
         if not upload_token:
-            raise ValueError("No upload token received")
+            logger.error("No upload token received after chunk upload completed")
+            logger.error(f"Total chunks: {len(chunks)}, File size: {file_size} bytes")
+            raise ValueError("No upload token received - chunks may not have uploaded successfully")
         
         # Step 7: Upload thumbnail and preview (if provided) in parallel
         # Use first 16 bytes of ORIGINAL key (not file_key) for encryption
@@ -363,14 +372,21 @@ class UploadCoordinator:
         total_mb = total_bytes / (1024 * 1024)
         logger.info(f"Processing {total} chunks ({total_mb:.2f} MB total, max {max_parallel_uploads} parallel uploads)")
         
+        # Validate we have chunks to upload
+        if total == 0:
+            logger.error("No chunks to upload - file may be empty or chunking failed")
+            raise ValueError("No chunks calculated for upload")
+        
         # Open file once for efficient reading (avoids repeated open/close)
         # Check if file_reader supports open_file/close_file (optional optimization)
         has_file_management = hasattr(self._file_reader, 'open_file') and hasattr(self._file_reader, 'close_file')
         try:
             if has_file_management:
                 await self._file_reader.open_file(file_path)
+                logger.debug("File opened for reading")
             
             # Process chunks: only read/encrypt when we have space for upload
+            logger.debug(f"Starting chunk processing loop: chunk_index={chunk_index}, total={total}, active_uploads={len(active_uploads)}")
             while chunk_index < total or active_uploads:
                 # Read and encrypt chunks only when we have space
                 while chunk_index < total and len(active_uploads) < max_parallel_uploads:
@@ -436,17 +452,33 @@ class UploadCoordinator:
             if active_uploads:
                 remaining = len(active_uploads)
                 logger.info(f"Waiting for {remaining} remaining chunk uploads to complete...")
-                results = await asyncio.gather(*active_uploads, return_exceptions=True)
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logger.error(f"Chunk upload failed: {result}")
-                        raise result
-                chunks_completed += remaining
-                logger.debug(f"All {remaining} remaining chunks completed")
+                try:
+                    results = await asyncio.gather(*active_uploads, return_exceptions=True)
+                    for i, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            logger.error(f"Chunk upload failed in final wait: {result}")
+                            raise result
+                    chunks_completed += remaining
+                    logger.info(f"All {remaining} remaining chunks completed successfully")
+                except Exception as e:
+                    logger.error(f"Error waiting for remaining chunks: {e}", exc_info=True)
+                    raise
+            
+            # Verify all chunks were processed
+            if chunks_completed != total:
+                logger.warning(f"Chunk count mismatch: completed={chunks_completed}, total={total}")
             
             # All chunks processed and uploaded
             uploaded_mb = total_bytes / (1024 * 1024)
-            logger.info(f"All chunks uploaded successfully: {total} chunks, {uploaded_mb:.2f} MB")
+            logger.info(f"All chunks uploaded successfully: {chunks_completed}/{total} chunks, {uploaded_mb:.2f} MB")
+            
+            # Verify upload token is set
+            upload_token_check = uploader.get_upload_token()
+            if not upload_token_check:
+                logger.error("Upload token is None after all chunks completed - this should not happen")
+                raise ValueError("Upload token not set after chunk upload completed")
+            else:
+                logger.debug(f"Upload token verified: {upload_token_check[:20]}...")
             
         finally:
             # Always close the file handle if it was opened
@@ -460,7 +492,7 @@ class UploadCoordinator:
         start: int,
         encrypted_chunk: bytes,
         start_time: float
-    ) -> None:
+    ) -> str:
         """
         Upload a single chunk (used as async task).
         
@@ -470,16 +502,26 @@ class UploadCoordinator:
             start: Start position in file
             encrypted_chunk: Encrypted chunk data
             start_time: Start time for timing
+            
+        Returns:
+            Upload token (empty string for intermediate chunks, token for last chunk)
         """
         try:
-            await uploader.upload_chunk(index, start, encrypted_chunk)
+            result = await uploader.upload_chunk(index, start, encrypted_chunk)
             elapsed = time.time() - start_time
             chunk_size_kb = len(encrypted_chunk) / 1024
             speed_kbps = (chunk_size_kb / elapsed) if elapsed > 0 else 0
-            logger.debug(f"Chunk {index} completed in {elapsed:.2f}s ({speed_kbps:.1f} KB/s)")
+            
+            # Log if this chunk returned a token (last chunk)
+            if result and result.strip():
+                logger.info(f"Chunk {index} completed with token in {elapsed:.2f}s ({speed_kbps:.1f} KB/s)")
+            else:
+                logger.debug(f"Chunk {index} completed in {elapsed:.2f}s ({speed_kbps:.1f} KB/s)")
+            
+            return result
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.error(f"Chunk {index} failed after {elapsed:.2f}s: {e}")
+            logger.error(f"Chunk {index} failed after {elapsed:.2f}s: {e}", exc_info=True)
             raise
     
     def _extract_node_handle(self, response: Dict[str, Any]) -> str:

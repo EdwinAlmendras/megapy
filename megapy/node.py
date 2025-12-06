@@ -1,7 +1,8 @@
 """Unified Node class for MEGA files and folders."""
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Iterator, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, Iterator, Union, TYPE_CHECKING
+from pathlib import Path
 
 if TYPE_CHECKING:
     from .client import MegaClient
@@ -118,7 +119,7 @@ class Node:
         """Get media info (duration, resolution, codecs) for video/audio files."""
         if self._media_info_cache is not None:
             return self._media_info_cache
-        if not self.has_media_info or not self.key:
+        if not self.has_media_info or not self.key or not self.fa:
             return None
         try:
             from .core.attributes import MediaAttributeService
@@ -304,25 +305,69 @@ class Node:
     # Operations (delegate to client)
     # =========================================================================
     
-    async def download(self, dest: str = ".") -> str:
+    async def download(self, dest: str = ".") -> 'Path':
+        """Download file to local path. Returns Path object."""
         if not self._client:
             raise RuntimeError("No client attached")
-        return await self._client.download(self, dest)
+        from pathlib import Path
+        result = await self._client.download(self, dest)
+        return Path(result) if isinstance(result, str) else result
     
     async def delete(self) -> bool:
         if not self._client:
             raise RuntimeError("No client attached")
         return await self._client.delete(self)
     
-    async def rename(self, new_name: str) -> bool:
+    async def rename(self, new_name: str) -> 'Node':
+        """Rename file/folder. Returns updated Node."""
         if not self._client:
             raise RuntimeError("No client attached")
         return await self._client.rename(self, new_name)
     
-    async def move(self, dest_folder: Node) -> bool:
+    async def move(self, dest_folder: Node) -> 'Node':
+        """Move file/folder to destination. Returns updated Node."""
         if not self._client:
             raise RuntimeError("No client attached")
         return await self._client.move(self, dest_folder)
+    
+    async def import_link(
+        self,
+        source: Union[str, 'Node'],
+        clear_attributes: bool = True
+    ) -> List['Node']:
+        """
+        Import a file or folder link (with all its children) into this folder.
+        
+        This creates a copy of the source file/folder and all its contents
+        in this folder. Based on webclient's import logic.
+        
+        Args:
+            source: Source file or folder to import (URL, handle, path, or Node)
+            clear_attributes: If True, clear sensitive attributes (s4, lbl, fav, sen)
+            
+        Returns:
+            List of imported Node objects
+            
+        Example:
+            >>> root = await mega.get_root()
+            >>> imports_folder = root / "imports"
+            >>> imported = await imports_folder.import_link(
+            ...     "https://mega.nz/folder/iJkVRL7T#SMCUCSEOhqwgV6uIUa1Wsw",
+            ...     clear_attributes=False
+            ... )
+            >>> print(f"Imported {len(imported)} nodes")
+        """
+        if not self._client:
+            raise RuntimeError("No client attached")
+        
+        if not self.is_folder:
+            raise ValueError(f"Cannot import into a file. This node is not a folder: {self.name}")
+        
+        return await self._client.import_folder(
+            source_folder=source,
+            target_folder=self,
+            clear_attributes=clear_attributes
+        )
 
 
 # Backward compatibility aliases

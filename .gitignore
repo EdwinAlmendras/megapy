@@ -3,6 +3,12 @@ test_files
 mega
 legacy
 test.*
+mega_api/
+mega-api/
+webclient/
+mega/
+legacy/
+build/
 *.session
 __pycache# Byte-compiled / optimized / DLL files
 __pycache__/

@@ -19,8 +19,9 @@ from ...node import Node
 from ..attributes.packer import AttributesPacker
 from ..crypto.utils.encoding import Base64Encoder
 from ..crypto.aes.aes_crypto import AESCrypto
+from ..logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class FolderImporter:

@@ -31,7 +31,7 @@ class FileValidator:
             
         Raises:
             FileNotFoundError: If file doesn't exist
-            ValueError: If path is not a regular file
+            ValueError: If path is not a regular file or file is empty (0 bytes)
         """
         path = Path(file_path) if isinstance(file_path, str) else file_path
         
@@ -42,6 +42,10 @@ class FileValidator:
             raise ValueError(f"Path is not a file: {path}")
         
         file_size = path.stat().st_size
+        
+        # Reject empty files (0 bytes) - they cannot be uploaded to MEGA
+        if file_size == 0:
+            raise ValueError(f"Cannot upload empty file (0 bytes): {path.name}")
         
         return path, file_size
     

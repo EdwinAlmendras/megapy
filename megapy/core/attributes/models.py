@@ -52,7 +52,7 @@ class FileAttributes:
     mega_id: Optional[str] = None  # m (links to MongoDB)
     
     # Extra custom attributes (flat, single-char keys)
-    _extra: Dict[str, Any] = field(default_factory=dict)
+    
     
     def __post_init__(self):
         if isinstance(self.mtime, datetime):
@@ -125,7 +125,7 @@ class FileAttributes:
             label=data.get('lbl', 0),
             favorite=bool(data.get('fav', 0)),
             mega_id=data.get('m'),
-            _extra=extra
+            **extra
         )
     
     @classmethod

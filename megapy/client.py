@@ -171,9 +171,11 @@ class MegaClient:
             base_path: Base path for session files
             auto_reconnect: Whether to auto-reconnect on session resume
         """
+        from .core.logging import get_logger
+        
         self._config = config or APIConfig.default()
         self._auto_reconnect = auto_reconnect
-        self._logger = logging.getLogger('megapy.client')
+        self._logger = get_logger('megapy.client')
         
         # Determine mode based on arguments
         if session is None:
@@ -210,6 +212,11 @@ class MegaClient:
         self._master_key: Optional[bytes] = None
         self._node_service: Optional[NodeService] = None
         self._current_node: Optional[Node] = None
+        
+        # Registration state (for multi-step registration)
+        self._registration_master_key: Optional[bytes] = None
+        self._registration_client_random_value: Optional[bytes] = None
+        self._registration_password: Optional[str] = None
     
     # =========================================================================
     # Configuration helpers
@@ -1420,6 +1427,69 @@ class MegaClient:
         
         return imported_nodes
     
+    async def init_register(
+        self,
+        email: str,
+        password: str,
+        first_name: str,
+        last_name: str
+    ):
+        """
+        Initialize account registration (step 1 of 3).
+        
+        This creates a new account and sends a confirmation email.
+        The user must confirm their email before the account is fully activated.
+        
+        Args:
+            email: User email address
+            password: User password
+            first_name: User's first name
+            last_name: User's last name
+            
+        Returns:
+            RegistrationResult with success status and message
+            
+        Example:
+            >>> async with MegaClient() as mega:
+            ...     result = await mega.init_register(
+            ...         email="user@example.com",
+            ...         password="secure_password",
+            ...         first_name="John",
+            ...         last_name="Doe"
+            ...     )
+            ...     if result.success:
+            ...         print("Check your email for confirmation")
+        """
+        import os
+        from .core.api.registration import StandardAccountRegistration, RegistrationData
+        
+        # Initialize API client if not already done
+        if self._api is None:
+            self._api = AsyncAPIClient(self._config)
+            await self._api.__aenter__()
+        
+        # Create registration handler
+        registration = StandardAccountRegistration(self._api)
+        
+        # Prepare registration data
+        data = RegistrationData(
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name
+        )
+        
+        # Execute registration
+        result = await registration.init_register(data)
+        
+        # Store registration data for later steps
+        if result.success and data.master_key and data.client_random_value:
+            self._registration_master_key = data.master_key
+            self._registration_client_random_value = data.client_random_value
+            self._registration_password = password
+        
+        return result
+    
     async def register(
         self,
         email: str,
@@ -1428,7 +1498,7 @@ class MegaClient:
         last_name: str
     ):
         """
-        Register a new MEGA account.
+        Register a new MEGA account (alias for init_register for backward compatibility).
         
         This creates a new account and sends a confirmation email.
         The user must confirm their email before the account is fully activated.
@@ -1453,7 +1523,30 @@ class MegaClient:
             ...     if result.success:
             ...         print("Check your email for confirmation")
         """
-        from .core.api.registration import StandardAccountRegistration, RegistrationData
+        return await self.init_register(email, password, first_name, last_name)
+    
+    async def confirm_code(self, confirm_code: str):
+        """
+        Confirm email with confirmation code (step 2 of 3).
+        
+        After calling init_register, the user receives an email with a confirmation code.
+        This method confirms the email address using that code.
+        
+        Args:
+            confirm_code: Confirmation code from email (base64url encoded, typically from URL hash)
+            
+        Returns:
+            ConfirmCodeResult with email, name, and user handle
+            
+        Example:
+            >>> async with MegaClient() as mega:
+            ...     result = await mega.init_register(...)
+            ...     # User receives email and clicks confirmation link
+            ...     confirm_result = await mega.confirm_code("ConfirmCodeV2...")
+            ...     if confirm_result.success:
+            ...         print(f"Email {confirm_result.email} confirmed")
+        """
+        from .core.api.registration import StandardAccountRegistration
         
         # Initialize API client if not already done
         if self._api is None:
@@ -1463,16 +1556,76 @@ class MegaClient:
         # Create registration handler
         registration = StandardAccountRegistration(self._api)
         
-        # Prepare registration data
-        data = RegistrationData(
-            email=email,
-            password=password,
-            first_name=first_name,
-            last_name=last_name
+        # Execute confirmation
+        return await registration.confirm_code(confirm_code)
+    
+    async def finalize_registration(self, confirm_code: str):
+        """
+        Finalize registration by completing verification and generating RSA keys (step 3 of 3).
+        
+        After confirming the email, this method completes the registration by:
+        1. Completing email verification
+        2. Generating RSA key pair
+        3. Uploading the keys to the server
+        
+        Args:
+            confirm_code: Confirmation code from email (same as used in confirm_code)
+            
+        Returns:
+            FinalizeResult with success status
+            
+        Example:
+            >>> async with MegaClient() as mega:
+            ...     # Step 1: Initialize registration
+            ...     result = await mega.init_register(...)
+            ...     
+            ...     # Step 2: Confirm email
+            ...     confirm_result = await mega.confirm_code("ConfirmCodeV2...")
+            ...     
+            ...     # Step 3: Finalize registration
+            ...     finalize_result = await mega.finalize_registration("ConfirmCodeV2...")
+            ...     if finalize_result.success:
+            ...         print("Account fully activated!")
+        """
+        from .core.api.registration import StandardAccountRegistration
+        
+        # Check if we have the necessary registration data
+        if not self._registration_master_key:
+            raise RuntimeError(
+                "No registration data found. Call init_register first."
+            )
+        if not self._registration_password:
+            raise RuntimeError(
+                "No registration password found. Call init_register first."
+            )
+        if not self._registration_client_random_value:
+            raise RuntimeError(
+                "No client random value found. Call init_register first."
+            )
+        
+        # Initialize API client if not already done
+        if self._api is None:
+            self._api = AsyncAPIClient(self._config)
+            await self._api.__aenter__()
+        
+        # Create registration handler
+        registration = StandardAccountRegistration(self._api)
+        
+        # Execute finalization
+        result = await registration.finalize_registration(
+            password=self._registration_password,
+            confirm_code=confirm_code,
+            master_key=self._registration_master_key,
+            client_random_value=self._registration_client_random_value
         )
         
-        # Execute registration
-        return await registration.register(data)
+        # Clear registration data after finalization
+        if result.success:
+            self._registration_master_key = None
+            self._registration_client_random_value = None
+            self._registration_password = None
+        
+        return result
     
     # =========================================================================
     # Private helpers
@@ -1494,6 +1647,10 @@ class MegaClient:
         if isinstance(file, Node):
             return file
         
+        # Check if it's a MEGA URL (folder or file)
+        if isinstance(file, str) and file.startswith('https://mega.nz/'):
+            return await self._resolve_url(file)
+        
         if self._node_service is None:
             await self._load_nodes()
         
@@ -1502,3 +1659,222 @@ class MegaClient:
             return node
         
         return await self.find(file)
+    
+    async def _resolve_url(self, url: str) -> Optional[Node]:
+        """
+        Resolve a MEGA URL to a Node.
+        
+        Supports:
+        - Folder URLs: https://mega.nz/folder/HANDLE#KEY
+        - File URLs: https://mega.nz/file/HANDLE#KEY
+        
+        Returns:
+            Node object for the folder/file, or None if not found
+        """
+        import re
+        import base64
+        import binascii
+        from urllib.parse import urlparse
+        
+        # Parse URL
+        parsed = urlparse(url)
+        path = parsed.path
+        fragment = parsed.fragment
+        
+        if not fragment:
+            raise ValueError(f"Missing key in MEGA URL: {url}")
+        
+        # Extract handle and type from path
+        folder_match = re.search(r'/folder/([^#/?]+)', path)
+        file_match = re.search(r'/file/([^#/?]+)', path)
+        
+        if folder_match:
+            handle = folder_match.group(1)
+            is_folder = True
+        elif file_match:
+            handle = file_match.group(1)
+            is_folder = False
+        else:
+            raise ValueError(f"Invalid MEGA URL format: {url}")
+        
+        # Decode key from fragment
+        key_str = fragment
+        # Pad key if needed for base64 decoding
+        padding = len(key_str) % 4
+        if padding:
+            key_str += '=' * (4 - padding)
+        
+        try:
+            key_bytes = base64.urlsafe_b64decode(key_str)
+        except (binascii.Error, ValueError):
+            raise ValueError(f"Invalid key in MEGA URL: {url}")
+        
+        # For folders, we need to fetch the folder info
+        if is_folder:
+            # For public folders, we use 'f' action with 'c: 1' to get children recursively
+            # This requires authentication, but works for public folders when logged in
+            try:
+                from .node import Node
+                from .core.attributes.packer import AttributesPacker
+                from .core.crypto import Base64Encoder
+                
+                # Request folder nodes using 'f' with 'c: 1' to get children
+                # The 'n' parameter specifies the folder handle
+                result = await self._api.request({
+                    'a': 'f',
+                    'c': 1,  # Get children recursively
+                    'n': handle
+                })
+                
+                if 'f' not in result or not result['f']:
+                    raise ValueError(f"No folder data returned for handle: {handle}")
+                
+                # Find the root folder in the response
+                folder_data = None
+                children_data = []
+                
+                for node_data in result['f']:
+                    if node_data.get('h') == handle and node_data.get('t') == 1:
+                        folder_data = node_data
+                    elif node_data.get('p') == handle:
+                        children_data.append(node_data)
+                
+                if not folder_data:
+                    raise ValueError(f"Folder handle {handle} not found in response")
+                
+                # Decrypt folder attributes using the key from URL
+                encoder = Base64Encoder()
+                name = handle
+                if folder_data.get('a') and key_bytes:
+                    try:
+                        attrs_encrypted = encoder.decode(folder_data['a'])
+                        attrs = AttributesPacker.unpack(attrs_encrypted, key_bytes[:16])
+                        if attrs:
+                            name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', handle)
+                    except Exception:
+                        pass  # Keep default name if decryption fails
+                
+                # Create the folder node
+                folder_node = Node(
+                    handle=handle,
+                    name=name,
+                    size=0,
+                    is_folder=True,
+                    parent_handle=None,
+                    key=key_bytes,
+                    _client=self,
+                    _raw=folder_data
+                )
+                
+                # Process children recursively
+                def process_children(parent_handle: str, parent_key: bytes, children: List[Dict[str, Any]]):
+                    """Recursively process children nodes."""
+                    for child_data in children:
+                        if child_data.get('p') == parent_handle:
+                            # Decrypt child key
+                            child_key = self._decrypt_child_key(child_data, parent_key)
+                            
+                            # Decrypt attributes
+                            child_name = child_data.get('h', '')
+                            if child_data.get('a') and child_key:
+                                try:
+                                    attrs_encrypted = encoder.decode(child_data['a'])
+                                    child_attrs = AttributesPacker.unpack(attrs_encrypted, child_key[:16])
+                                    if child_attrs:
+                                        child_name = child_attrs.name if hasattr(child_attrs, 'name') else child_attrs.to_dict().get('n', child_name)
+                                except Exception:
+                                    pass  # Keep default name if decryption fails
+                            
+                            # Create child node
+                            child_node = Node(
+                                handle=child_data.get('h', ''),
+                                name=child_name,
+                                size=child_data.get('s', 0),
+                                is_folder=(child_data.get('t', 0) == 1),
+                                parent_handle=parent_handle,
+                                key=child_key,
+                                _client=self,
+                                _raw=child_data
+                            )
+                            
+                            folder_node.children.append(child_node)
+                            
+                            # If it's a folder, process its children recursively
+                            if child_node.is_folder:
+                                process_children(child_node.handle, child_key, result['f'])
+                
+                # Process all children
+                process_children(handle, key_bytes, result['f'])
+                
+                return folder_node
+            except Exception as e:
+                self._logger.warning(f"Failed to resolve public folder URL: {e}")
+                raise ValueError(f"Could not access public folder: {url}. Error: {e}")
+        
+        # For files, we can create a Node directly
+        else:
+            try:
+                result = await self._api.request({
+                    'a': 'g',
+                    'p': handle
+                })
+                
+                from .node import Node
+                file_node = Node(
+                    handle=handle,
+                    name=handle,  # Will be decrypted from attributes if available
+                    size=result.get('s', 0),
+                    is_folder=False,
+                    parent_handle=None,
+                    key=key_bytes,
+                    _client=self,
+                    _raw=result
+                )
+                
+                # Try to decrypt attributes
+                try:
+                    from .core.attributes.packer import AttributesPacker
+                    from .core.crypto import Base64Encoder
+                    encoder = Base64Encoder()
+                    if result.get('a') and key_bytes:
+                        attrs_encrypted = encoder.decode(result['a'])
+                        attrs = AttributesPacker.unpack(attrs_encrypted, key_bytes[:16])
+                        if attrs:
+                            file_node.name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', handle)
+                except Exception:
+                    pass  # Keep default name if decryption fails
+                
+                return file_node
+            except Exception as e:
+                self._logger.warning(f"Failed to resolve public file URL: {e}")
+                raise ValueError(f"Could not access public file: {url}")
+        
+        return None
+    
+    def _decrypt_child_key(self, child_data: Dict[str, Any], parent_key: bytes) -> bytes:
+        """Decrypt a child node's key using parent folder key."""
+        from .core.crypto.aes.aes_crypto import AESCrypto
+        
+        # Child key is encrypted with parent key
+        encrypted_key = child_data.get('k', '')
+        if not encrypted_key:
+            return parent_key  # Fallback to parent key
+        
+        # Parse key: "handle:encrypted_key"
+        if ':' in encrypted_key:
+            _, enc_key_part = encrypted_key.split(':', 1)
+        else:
+            enc_key_part = encrypted_key
+        
+        # Decode and decrypt
+        try:
+            from .core.crypto.utils.encoding import Base64Encoder
+            encoder = Base64Encoder()
+            enc_key_bytes = encoder.decode(enc_key_part)
+            
+            aes = AESCrypto(parent_key)
+            decrypted_key = aes.decrypt_ecb(enc_key_bytes)
+            
+            return decrypted_key
+        except Exception:
+            return parent_key  # Fallback
