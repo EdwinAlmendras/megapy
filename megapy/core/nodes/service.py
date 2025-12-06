@@ -2,6 +2,7 @@
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from .decryptor import KeyDecryptor
 from ...node import Node
+from ..attributes.models import FileAttributes
 
 if TYPE_CHECKING:
     from ...client import MegaClient
@@ -110,6 +111,7 @@ class NodeService:
                 parent_handle=data.get('p'),
                 key=key,
                 fa=data.get('fa'),
+                attributes=FileAttributes.from_dict(attrs),
                 _client=self._client,
                 _raw=data
             )

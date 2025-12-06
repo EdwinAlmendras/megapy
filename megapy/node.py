@@ -7,6 +7,7 @@ from pathlib import Path
 if TYPE_CHECKING:
     from .client import MegaClient
     from .core.attributes.media import MediaInfo
+    from .core.attributes.models import FileAttributes
 
 
 @dataclass
@@ -28,7 +29,7 @@ class Node:
     parent_handle: Optional[str] = None
     key: Optional[bytes] = None
     fa: Optional[str] = None
-    
+    attributes: Optional[FileAttributes] = None
     parent: Optional[Node] = field(default=None, repr=False)
     children: List[Node] = field(default_factory=list, repr=False)
     
