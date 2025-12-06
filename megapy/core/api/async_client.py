@@ -25,6 +25,7 @@ class AsyncAPIClient:
     - Automatic retry with exponential backoff
     - Connection pooling
     - Hashcash challenge handling
+    - Request batching (groups multiple requests into single API call to avoid EAGAIN)
     
     Example:
         >>> config = APIConfig.default()
@@ -45,6 +46,13 @@ class AsyncAPIClient:
         self._counter_id = random.randint(0, 1_000_000_000)
         self._session_id: Optional[str] = None
         self._closed = False
+        
+        # Request batching (like webclient)
+        self._request_queue: List[Dict[str, Any]] = []
+        self._queue_futures: List[asyncio.Future] = []
+        self._flush_task: Optional[asyncio.Task] = None
+        self._flush_delay = 0.35  # 350ms delay like webclient
+        self._max_batch_size = 50  # Maximum requests per batch
         
         self._logger = logging.getLogger('megapy.api')
         self._logger.setLevel(self._config.log_level)
@@ -98,6 +106,18 @@ class AsyncAPIClient:
         """Close client and release resources."""
         self._closed = True
         
+        # Flush any pending requests before closing
+        if self._request_queue:
+            await self._flush_queue()
+        
+        # Cancel flush task if pending
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -125,11 +145,14 @@ class AsyncAPIClient:
         retry_count: int = 0
     ) -> Any:
         """
-        Make async request to MEGA API.
+        Make async request to MEGA API with automatic batching.
+        
+        Requests are automatically batched together (like webclient) to avoid
+        EAGAIN errors from too many concurrent API calls.
         
         Args:
             data: Request data
-            retry_count: Current retry attempt
+            retry_count: Current retry attempt (internal use)
             
         Returns:
             API response data
@@ -140,6 +163,166 @@ class AsyncAPIClient:
         if self._closed:
             raise MegaAPIError(-1, "Client is closed")
         
+        # For immediate requests (with special flags) or if retrying, don't batch
+        immediate = data.get('_immediate', False) or retry_count > 0
+        
+        if immediate:
+            return await self._request_immediate(data, retry_count)
+        
+        # Queue request for batching
+        future = asyncio.Future()
+        self._request_queue.append(data)
+        self._queue_futures.append(future)
+        
+        # Schedule flush if not already scheduled
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._schedule_flush())
+        
+        # If queue is full, flush immediately
+        if len(self._request_queue) >= self._max_batch_size:
+            await self._flush_queue()
+        
+        return await future
+    
+    async def _schedule_flush(self):
+        """Schedule a flush after delay (like webclient's 350ms delay)."""
+        await asyncio.sleep(self._flush_delay)
+        await self._flush_queue()
+    
+    async def _flush_queue(self):
+        """Flush all queued requests in a single batch."""
+        if not self._request_queue:
+            return
+        
+        # Take all queued requests
+        queue = self._request_queue[:]
+        futures = self._queue_futures[:]
+        
+        # Clear queue
+        self._request_queue.clear()
+        self._queue_futures.clear()
+        
+        # Cancel flush task if still pending
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        self._flush_task = None
+        
+        if not queue:
+            return
+        
+        # Execute batch request
+        try:
+            results = await self._request_batch(queue)
+            
+            # Resolve futures with results
+            for i, future in enumerate(futures):
+                if not future.done():
+                    if i < len(results):
+                        if isinstance(results[i], int) and results[i] < 0:
+                            future.set_exception(MegaAPIError(results[i], f"MEGA API error: {results[i]}"))
+                        else:
+                            future.set_result(results[i])
+                    else:
+                        future.set_exception(MegaAPIError(-1, "No response received"))
+        except Exception as e:
+            # If batch fails, fail all futures
+            for future in futures:
+                if not future.done():
+                    future.set_exception(e)
+    
+    async def _request_batch(
+        self,
+        requests: List[Dict[str, Any]],
+        retry_count: int = 0
+    ) -> List[Any]:
+        """
+        Execute a batch of requests in a single API call.
+        
+        Args:
+            requests: List of request data dicts
+            retry_count: Current retry attempt
+            
+        Returns:
+            List of response data
+        """
+        session = await self._ensure_session()
+        self._counter_id += 1
+        
+        # Extract special fields from first request (if any)
+        querystring = requests[0].pop('_querystring', None) if requests else None
+        hashcash = requests[0].pop('_hashcash', None) if requests else None
+        
+        url = self._build_url(querystring)
+        headers = {}
+        
+        if hashcash:
+            headers['X-MEGA-hashcash'] = hashcash
+        
+        # Prepare batch request body (array of requests)
+        body = json.dumps(requests)
+        
+        self._logger.debug(f"Batch request ({len(requests)} requests) to {url}")
+        
+        try:
+            async with session.post(
+                url,
+                data=body,
+                headers=headers,
+                proxy=self._config.proxy.to_aiohttp_proxy() if self._config.proxy else None
+            ) as response:
+                # Handle hashcash challenge
+                if 'X-Hashcash' in response.headers:
+                    challenge = response.headers['X-Hashcash']
+                    if requests:
+                        requests[0]['_hashcash'] = generate_hashcash_token(challenge)
+                    return await self._request_batch(requests, retry_count)
+                
+                response_text = await response.text()
+                results = self._parse_batch_response(response_text)
+                
+                # Check for errors and retry if needed
+                for i, result in enumerate(results):
+                    if isinstance(result, int) and result < 0:
+                        if self._should_retry(result, retry_count):
+                            # Retry entire batch
+                            delay = self._config.retry.calculate_delay(retry_count)
+                            self._logger.warning(
+                                f"Retrying batch after error {result}, attempt {retry_count + 1}"
+                            )
+                            await asyncio.sleep(delay)
+                            return await self._request_batch(requests, retry_count + 1)
+                
+                return results
+                
+        except aiohttp.ClientError as e:
+            self._logger.error(f"Network error in batch: {e}")
+            
+            if retry_count < self._config.retry.max_retries:
+                delay = self._config.retry.calculate_delay(retry_count)
+                await asyncio.sleep(delay)
+                return await self._request_batch(requests, retry_count + 1)
+            
+            raise MegaAPIError(-1, f"Network error: {e}")
+    
+    async def _request_immediate(
+        self,
+        data: Dict[str, Any],
+        retry_count: int = 0
+    ) -> Any:
+        """
+        Make immediate request without batching (for retries or special cases).
+        
+        Args:
+            data: Request data
+            retry_count: Current retry attempt
+            
+        Returns:
+            API response data
+        """
         session = await self._ensure_session()
         self._counter_id += 1
         
@@ -156,7 +339,7 @@ class AsyncAPIClient:
         # Prepare request body
         body = json.dumps([data])
         
-        self._logger.debug(f"Request to {url}")
+        self._logger.debug(f"Immediate request to {url}")
         
         try:
             async with session.post(
@@ -169,7 +352,7 @@ class AsyncAPIClient:
                 if 'X-Hashcash' in response.headers:
                     challenge = response.headers['X-Hashcash']
                     data['_hashcash'] = generate_hashcash_token(challenge)
-                    return await self.request(data, retry_count)
+                    return await self._request_immediate(data, retry_count)
                 
                 response_text = await response.text()
                 result = self._parse_response(response_text)
@@ -182,7 +365,7 @@ class AsyncAPIClient:
                             f"Retrying after error {result}, attempt {retry_count + 1}"
                         )
                         await asyncio.sleep(delay)
-                        return await self.request(data, retry_count + 1)
+                        return await self._request_immediate(data, retry_count + 1)
                     
                     raise MegaAPIError(result, f"MEGA API error: {result}")
                 
@@ -194,9 +377,23 @@ class AsyncAPIClient:
             if retry_count < self._config.retry.max_retries:
                 delay = self._config.retry.calculate_delay(retry_count)
                 await asyncio.sleep(delay)
-                return await self.request(data, retry_count + 1)
+                return await self._request_immediate(data, retry_count + 1)
             
             raise MegaAPIError(-1, f"Network error: {e}")
+    
+    def _parse_batch_response(self, response_text: str) -> List[Any]:
+        """Parse batch API response (array of results)."""
+        try:
+            data = json.loads(response_text)
+            
+            if isinstance(data, list):
+                return data
+            
+            # Single result wrapped in array
+            return [data]
+            
+        except json.JSONDecodeError:
+            return [response_text]
     
     def _parse_response(self, response_text: str) -> Any:
         """Parse API response."""
