@@ -149,3 +149,27 @@ class NodeService:
     def all_folders(self) -> List[Node]:
         """Get all folders (flat list)."""
         return [n for n in self._nodes.values() if n.is_folder]
+    
+    def add_node(self, node: Node) -> None:
+        """
+        Add a node to the tree and update parent-child relationships.
+        
+        This method should be called after creating a new node (via create_folder,
+        upload, etc.) to ensure it's properly integrated into the tree structure.
+        
+        Args:
+            node: Node to add to the tree
+        """
+        if not node or not node.handle:
+            return
+        
+        # Add to nodes dictionary
+        self._nodes[node.handle] = node
+        
+        # Update parent-child relationship if parent exists
+        if node.parent_handle:
+            parent_node = self._nodes.get(node.parent_handle)
+            if parent_node:
+                node.parent = parent_node
+                if node not in parent_node.children:
+                    parent_node.children.append(node)

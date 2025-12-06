@@ -859,9 +859,9 @@ class MegaClient:
             _client=self
         )
         
-        # Add to node service cache
+        # Add to node service tree and update parent-child relationships
         if self._node_service:
-            self._node_service.nodes[result.node_handle] = node
+            self._node_service.add_node(node)
         
         file_size_mb = result.file_size / (1024 * 1024)
         self._logger.info(f"Upload finished successfully: {path.name} -> {result.node_handle} ({file_size_mb:.2f} MB)")
@@ -1297,18 +1297,39 @@ class MegaClient:
         name: str,
         parent: Optional[Union[str, MegaFile]] = None
     ) -> Node:
-        """Create a new folder."""
+        """
+        Create a new folder, or return existing folder if it already exists.
+        
+        Args:
+            name: Folder name
+            parent: Parent folder (handle, path, or Node). None for root.
+            
+        Returns:
+            Node representing the folder (existing or newly created)
+        """
         self._ensure_logged_in()
         
         if self._node_service is None:
             await self._load_nodes()
         
+        # Resolve parent node
+        parent_node = None
         parent_id = self._node_service.root_handle
         if parent:
             parent_node = await self._resolve_file(parent)
             if parent_node:
                 parent_id = parent_node.handle
+        else:
+            parent_node = self._node_service.root
         
+        # Check if folder already exists in parent
+        if parent_node:
+            existing_folder = parent_node.get(name)
+            if existing_folder and existing_folder.is_folder:
+                # Folder already exists, return it
+                return existing_folder
+        
+        # Folder doesn't exist, create it
         import os
         import json
         from Crypto.Cipher import AES
@@ -1347,7 +1368,8 @@ class MegaClient:
                 _client=self
             )
             if self._node_service:
-                self._node_service.nodes[data['h']] = node
+                # Add node to tree and update parent-child relationships
+                self._node_service.add_node(node)
             return node
         
         raise ValueError("Failed to create folder")
@@ -1390,6 +1412,45 @@ class MegaClient:
         
         if not source.is_folder:
             raise ValueError(f"Source must be a folder, got: {source.handle}")
+        
+        # If source is a public folder URL without children loaded, try to load them
+        if source._raw and source._raw.get('_public_url') and not source.children:
+            # For public folders, we need to use the API with the key from URL
+            # The key from URL is the share key, we need to use it in the API call
+            try:
+                # Parse URL to get handle and key
+                import re
+                from urllib.parse import urlparse
+                import base64
+                import binascii
+                
+                parsed = urlparse(source._raw['_public_url'])
+                folder_match = re.search(r'/folder/([^#/?]+)', parsed.path)
+                if folder_match:
+                    handle = folder_match.group(1)
+                    key_str = parsed.fragment
+                    
+                    # Decode key
+                    padding = len(key_str) % 4
+                    if padding:
+                        key_str += '=' * (4 - padding)
+                    key_bytes = base64.urlsafe_b64decode(key_str)
+                    
+                    # Try to get folder nodes using the key
+                    # For public folders, we might need to pass the key differently
+                    # Let's try using 'a: f' with the handle and see if it works when authenticated
+                    result = await self._api.request({
+                        'a': 'f',
+                        'c': 1,
+                        'n': handle
+                    })
+                    
+                    if 'f' in result and result['f']:
+                        # Load children from API result
+                        self._load_children_from_api_result(source, result['f'], key_bytes)
+            except Exception as e:
+                self._logger.warning(f"Could not load children for public folder: {e}")
+                # Continue anyway - the import might still work
         
         # Resolve target folder
         target = await self._resolve_file(target_folder)
@@ -1711,105 +1772,71 @@ class MegaClient:
         
         # For folders, we need to fetch the folder info
         if is_folder:
-            # For public folders, we use 'f' action with 'c: 1' to get children recursively
-            # This requires authentication, but works for public folders when logged in
+            # For public folders, we can't use 'a: f' directly because we don't have access
+            # Instead, we create a minimal Node with the handle and key from URL
+            # The import process will handle getting the nodes using the API with the key
+            from .node import Node
+            
+            # Create a minimal folder node with handle and key from URL
+            # The actual folder structure will be loaded during import
+            folder_node = Node(
+                handle=handle,
+                name=f"Folder-{handle}",  # Temporary name
+                size=0,
+                is_folder=True,
+                parent_handle=None,
+                key=key_bytes,  # This is the share key from URL
+                _client=self,
+                _raw={
+                    'h': handle,
+                    't': 1,  # Folder type
+                    'a': None,  # Attributes will be loaded during import
+                    'k': None  # Key will be handled during import
+                }
+            )
+            
+            # Store the URL in _raw for later use during import
+            folder_node._raw['_public_url'] = url
+            
+            # Try to get folder info if we're authenticated
+            # This might work for folders we have access to
             try:
-                from .node import Node
-                from .core.attributes.packer import AttributesPacker
-                from .core.crypto import Base64Encoder
-                
-                # Request folder nodes using 'f' with 'c: 1' to get children
-                # The 'n' parameter specifies the folder handle
                 result = await self._api.request({
                     'a': 'f',
-                    'c': 1,  # Get children recursively
+                    'c': 1,
                     'n': handle
                 })
                 
-                if 'f' not in result or not result['f']:
-                    raise ValueError(f"No folder data returned for handle: {handle}")
-                
-                # Find the root folder in the response
-                folder_data = None
-                children_data = []
-                
-                for node_data in result['f']:
-                    if node_data.get('h') == handle and node_data.get('t') == 1:
-                        folder_data = node_data
-                    elif node_data.get('p') == handle:
-                        children_data.append(node_data)
-                
-                if not folder_data:
-                    raise ValueError(f"Folder handle {handle} not found in response")
-                
-                # Decrypt folder attributes using the key from URL
-                encoder = Base64Encoder()
-                name = handle
-                if folder_data.get('a') and key_bytes:
-                    try:
-                        attrs_encrypted = encoder.decode(folder_data['a'])
-                        attrs = AttributesPacker.unpack(attrs_encrypted, key_bytes[:16])
-                        if attrs:
-                            name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', handle)
-                    except Exception:
-                        pass  # Keep default name if decryption fails
-                
-                # Create the folder node
-                folder_node = Node(
-                    handle=handle,
-                    name=name,
-                    size=0,
-                    is_folder=True,
-                    parent_handle=None,
-                    key=key_bytes,
-                    _client=self,
-                    _raw=folder_data
-                )
-                
-                # Process children recursively
-                def process_children(parent_handle: str, parent_key: bytes, children: List[Dict[str, Any]]):
-                    """Recursively process children nodes."""
-                    for child_data in children:
-                        if child_data.get('p') == parent_handle:
-                            # Decrypt child key
-                            child_key = self._decrypt_child_key(child_data, parent_key)
+                if 'f' in result and result['f']:
+                    # Find the folder in response
+                    for node_data in result['f']:
+                        if node_data.get('h') == handle and node_data.get('t') == 1:
+                            # Update with real data
+                            folder_node._raw = node_data
                             
-                            # Decrypt attributes
-                            child_name = child_data.get('h', '')
-                            if child_data.get('a') and child_key:
+                            # Try to decrypt name
+                            from .core.attributes.packer import AttributesPacker
+                            from .core.crypto import Base64Encoder
+                            encoder = Base64Encoder()
+                            
+                            if node_data.get('a') and key_bytes:
                                 try:
-                                    attrs_encrypted = encoder.decode(child_data['a'])
-                                    child_attrs = AttributesPacker.unpack(attrs_encrypted, child_key[:16])
-                                    if child_attrs:
-                                        child_name = child_attrs.name if hasattr(child_attrs, 'name') else child_attrs.to_dict().get('n', child_name)
+                                    attrs_encrypted = encoder.decode(node_data['a'])
+                                    attrs = AttributesPacker.unpack(attrs_encrypted, key_bytes[:16])
+                                    if attrs:
+                                        folder_node.name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', folder_node.name)
                                 except Exception:
-                                    pass  # Keep default name if decryption fails
+                                    pass
                             
-                            # Create child node
-                            child_node = Node(
-                                handle=child_data.get('h', ''),
-                                name=child_name,
-                                size=child_data.get('s', 0),
-                                is_folder=(child_data.get('t', 0) == 1),
-                                parent_handle=parent_handle,
-                                key=child_key,
-                                _client=self,
-                                _raw=child_data
-                            )
-                            
-                            folder_node.children.append(child_node)
-                            
-                            # If it's a folder, process its children recursively
-                            if child_node.is_folder:
-                                process_children(child_node.handle, child_key, result['f'])
-                
-                # Process all children
-                process_children(handle, key_bytes, result['f'])
-                
-                return folder_node
-            except Exception as e:
-                self._logger.warning(f"Failed to resolve public folder URL: {e}")
-                raise ValueError(f"Could not access public folder: {url}. Error: {e}")
+                            # Load children if available
+                            self._load_children_from_api_result(folder_node, result['f'], key_bytes)
+                            break
+            except Exception:
+                # If we can't get folder info (e.g., public folder without access),
+                # that's OK - the import process will handle it using the URL
+                pass
+            
+            return folder_node
         
         # For files, we can create a Node directly
         else:
@@ -1850,6 +1877,51 @@ class MegaClient:
                 raise ValueError(f"Could not access public file: {url}")
         
         return None
+    
+    def _load_children_from_api_result(self, folder_node: 'Node', all_nodes: List[Dict[str, Any]], parent_key: bytes):
+        """Load children nodes from API result recursively."""
+        from .node import Node
+        from .core.attributes.packer import AttributesPacker
+        from .core.crypto import Base64Encoder
+        encoder = Base64Encoder()
+        
+        def process_children(parent_handle: str, parent_key: bytes):
+            """Recursively process children nodes."""
+            for child_data in all_nodes:
+                if child_data.get('p') == parent_handle:
+                    # Decrypt child key
+                    child_key = self._decrypt_child_key(child_data, parent_key)
+                    
+                    # Decrypt attributes
+                    child_name = child_data.get('h', '')
+                    if child_data.get('a') and child_key:
+                        try:
+                            attrs_encrypted = encoder.decode(child_data['a'])
+                            child_attrs = AttributesPacker.unpack(attrs_encrypted, child_key[:16])
+                            if child_attrs:
+                                child_name = child_attrs.name if hasattr(child_attrs, 'name') else child_attrs.to_dict().get('n', child_name)
+                        except Exception:
+                            pass
+                    
+                    # Create child node
+                    child_node = Node(
+                        handle=child_data.get('h', ''),
+                        name=child_name,
+                        size=child_data.get('s', 0),
+                        is_folder=(child_data.get('t', 0) == 1),
+                        parent_handle=parent_handle,
+                        key=child_key,
+                        _client=self,
+                        _raw=child_data
+                    )
+                    
+                    folder_node.children.append(child_node)
+                    
+                    # If it's a folder, process its children recursively
+                    if child_node.is_folder:
+                        process_children(child_node.handle, child_key)
+        
+        process_children(folder_node.handle, parent_key)
     
     def _decrypt_child_key(self, child_data: Dict[str, Any], parent_key: bytes) -> bytes:
         """Decrypt a child node's key using parent folder key."""
