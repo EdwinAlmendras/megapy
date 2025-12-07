@@ -1379,20 +1379,20 @@ class MegaClient:
         
         raise ValueError("Failed to create folder")
     
-    async def import_folder(
+    async def import_link(
         self,
-        source_folder: Union[str, MegaFile],
-        target_folder: Union[str, MegaFile],
+        source_node: Union[str, MegaFile, Node],
+        target_folder: Union[str, MegaFile, Node],
         clear_attributes: bool = True
     ) -> List[Node]:
         """
-        Import a folder with all its children to target folder.
+        Import a folder or file from public link to target folder.
         
-        This creates a copy of the source folder and all its contents
-        in the target location. Based on webclient's folder import logic.
+        This creates a copy of the source node (folder with all children, or single file)
+        in the target location. Based on webclient's link import logic.
         
         Args:
-            source_folder: Source folder to import (handle, path, or Node)
+            source_node: Source node to import (handle, path, or Node) - can be folder or file
             target_folder: Target folder where to import (handle, path, or Node)
             clear_attributes: If True, clear sensitive attributes (s4, lbl, fav, sen)
             
@@ -1400,24 +1400,26 @@ class MegaClient:
             List of imported Node objects
             
         Example:
-            >>> source = await mega.find("Documents")
+            >>> # Import a folder
+            >>> source = await mega.resolve_public_link("https://mega.nz/folder/...")
             >>> target = await mega.find("Backups")
-            >>> imported = await mega.import_folder(source, target)
-            >>> print(f"Imported {len(imported)} nodes")
+            >>> imported = await mega.import_link(source, target)
+            >>> 
+            >>> # Import a single file
+            >>> source_file = await mega.resolve_public_link("https://mega.nz/file/...")
+            >>> imported = await mega.import_link(source_file, target)
         """
         self._ensure_logged_in()
         
         if self._node_service is None:
             await self._load_nodes()
         
-        # Resolve source folder
-        source = await self._resolve_file(source_folder)
+        # Resolve source node (can be folder or file)
+        source = await self._resolve_file(source_node)
         if not source:
-            raise FileNotFoundError(f"Source folder not found: {source_folder}")
+            raise FileNotFoundError(f"Source node not found: {source_node}")
         
-        if not source.is_folder:
-            raise ValueError(f"Source must be a folder, got: {source.handle}")
-        
+        # Resolve target folder
         target = await self._resolve_file(target_folder)
         if not target:
             raise FileNotFoundError(f"Target folder not found: {target_folder}")
@@ -1433,12 +1435,44 @@ class MegaClient:
             node_service=self._node_service
         )
         
-        # Execute import
-        handles = await importer.import_folder(
-            source_folder=source,
+        # Execute import (supports both folders and files)
+        handles = await importer.import_link(
+            source_node=source,
             target_folder_handle=target.handle,
             clear_attributes=clear_attributes
         )
+        
+        # Return empty list for now (handles are returned but we'd need to fetch nodes)
+        # TODO: Fetch and return actual Node objects from handles
+        return []
+    
+    async def import_folder(
+        self,
+        source_folder: Union[str, MegaFile],
+        target_folder: Union[str, MegaFile],
+        clear_attributes: bool = True
+    ) -> List[Node]:
+        """
+        Import a folder with all its children to target folder.
+        
+        DEPRECATED: Use import_link() instead. This method is kept for backward compatibility.
+        
+        Args:
+            source_folder: Source folder to import (handle, path, or Node)
+            target_folder: Target folder where to import (handle, path, or Node)
+            clear_attributes: If True, clear sensitive attributes (s4, lbl, fav, sen)
+            
+        Returns:
+            List of imported Node objects
+        """
+        source = await self._resolve_file(source_folder)
+        if not source:
+            raise FileNotFoundError(f"Source folder not found: {source_folder}")
+        
+        if not source.is_folder:
+            raise ValueError(f"Source must be a folder, got: {source.handle}")
+        
+        return await self.import_link(source, target_folder, clear_attributes)
         
     
     async def init_register(
@@ -1734,6 +1768,7 @@ class MegaClient:
         
         # For folders, we need to fetch the folder info
         if is_folder:
+            print("its folder")
             logger.info(f"Resolving folder URL, handle: {handle}")
             from .node import Node
             folder_node = Node(
@@ -1795,59 +1830,54 @@ class MegaClient:
 
             logger.debug(f"Loading children nodes for folder: {folder_node.name}")
 
+            
             self._load_children_from_api_result(folder_node, nodes, key_bytes)
             logger.info(f"Successfully resolved folder URL: {folder_node.name} ({handle})")
-    
-           
             return folder_node
         
         # For files, we can create a Node directly
         else:
+            print("its file")
             logger.info(f"Resolving file URL, handle: {handle}")
-            try:
-                logger.debug(f"Requesting file info from API for handle: {handle}")
-                result = await self._api.request({
-                    'a': 'g',
-                    'p': handle
-                })
-                
-                logger.debug(f"Received file info from API: size={result.get('s', 0)}")
-                
-                from .node import Node
-                file_node = Node(
-                    handle=handle,
-                    name=handle,  # Will be decrypted from attributes if available
-                    size=result.get('s', 0),
-                    is_folder=False,
-                    parent_handle=None,
-                    key=key_bytes,
-                    _client=self,
-                    _raw=result
-                )
-                
-                # Try to decrypt attributes
-                try:
-                    from .core.attributes.packer import AttributesPacker
-                    from .core.crypto import Base64Encoder
-                    encoder = Base64Encoder()
-                    if result.get('a') and key_bytes:
-                        logger.debug(f"Attempting to decrypt file attributes")
-                        attrs_encrypted = encoder.decode(result['a'])
-                        attrs = AttributesPacker.unpack(attrs_encrypted, key_bytes[:16])
-                        if attrs:
-                            file_node.name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', handle)
-                            logger.debug(f"Successfully decrypted file name: {file_node.name}")
-                except Exception as e:
-                    logger.warning(f"Failed to decrypt file attributes: {e}, keeping default name")
-                    pass  # Keep default name if decryption fails
-                
-                logger.info(f"Successfully resolved file URL: {file_node.name} ({handle}), size: {file_node.size}")
-                return file_node
-            except Exception as e:
-                logger.error(f"Failed to resolve public file URL: {url}, error: {e}")
-                self._logger.warning(f"Failed to resolve public file URL: {e}")
-                raise ValueError(f"Could not access public file: {url}")
-        
+            logger.debug(f"Requesting file info from API for handle: {handle}")
+            result = await self._api.request({
+                'a': 'g',
+                'p': handle
+            })
+            
+            logger.debug(f"Received file info from API: size={result.get('s', 0)}")
+            
+            from .node import Node
+            file_node = Node(
+                handle=handle,
+                name=handle,  # Will be decrypted from attributes if available
+                size=result.get('s', 0),
+                is_folder=False,
+                parent_handle=None,
+                key=key_bytes,
+                _client=self,
+                _raw=result
+            )
+            
+            from .core.attributes.packer import AttributesPacker
+            from .core.crypto import Base64Encoder
+            from .core.nodes.key import KeyFileManager
+            encoder = Base64Encoder()
+            node_data = result
+            print(node_data)
+            if node_data.get('at') and key_bytes:
+                manager = KeyFileManager.from_merged_key(key_bytes, self._master_key)
+                attrs = manager.decrypt_attributes(encoder.decode(node_data['at']))
+                file_node.key = manager.full_key
+                print(attrs, "ATTRIBUTRES")
+                file_node.attributes = attrs
+                if attrs:
+                    file_node.name = attrs.name
+                else:
+                    raise ValueError(f"Failed to decrypt folder attributes for handle: {handle}")
+            logger.info(f"Successfully resolved file URL: {file_node.name} ({handle}), size: {file_node.size}")
+            return file_node
+
         return None
     
     def _load_children_from_api_result(self, folder_node: 'Node', all_nodes: List[Dict[str, Any]], parent_key: bytes):
@@ -1858,11 +1888,12 @@ class MegaClient:
         encoder = Base64Encoder()
         
         logger.debug(f"Loading children for folder: {folder_node.name} (handle: {folder_node.handle}), total nodes in result: {len(all_nodes)}")
-        
+        print(all_nodes)
         def process_children(parent_node: 'Node', parent_key: bytes, depth: int = 0):
             """Recursively process children nodes."""
             indent = "  " * depth
             children_count = 0
+            print(parent_node)
             for child_data in all_nodes:
                 if child_data.get('p') == parent_node.handle:
                     children_count += 1
@@ -1899,7 +1930,7 @@ class MegaClient:
             
             if children_count > 0:
                 logger.debug(f"{indent}Processed {children_count} children for parent: {parent_node.handle} ({parent_node.name})")
-        
+        print("procssing")
         process_children(folder_node, parent_key)
         logger.info(f"Finished loading children for folder: {folder_node.name}, total children: {len(folder_node.children)}")
     

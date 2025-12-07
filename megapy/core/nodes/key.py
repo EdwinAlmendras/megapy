@@ -28,6 +28,14 @@ class KeyFileManager:
         return cls(key, master_key, mac)
     
     @classmethod
+    def from_merged_key(cls, merged_key: bytes, master_key: bytes) -> 'KeyFileManager':
+        """Create a KeyFileManager from a merged key (32 bytes)."""
+        full_key = unmerge_key_mac(merged_key)
+        key, mac = full_key[:16], full_key[16:]
+        return cls(key, master_key, mac)
+
+
+    @classmethod
     def parse_key(cls, key_str: str, master_key: bytes) -> 'KeyFileManager':
         """Parse key from MEGA API response.
         

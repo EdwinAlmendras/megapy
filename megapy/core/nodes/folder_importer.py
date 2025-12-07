@@ -1,13 +1,14 @@
 """
-Folder Importer - Single Responsibility: Import folders with all children.
+Link Importer - Single Responsibility: Import folders or files from public links.
 
-This module implements the folder import functionality based on the webclient's
+This module implements the link import functionality based on the webclient's
 importFolderLinkNodes, getCopyNodes, and copyNodes logic.
 
 Process:
-1. Collect all nodes recursively from source folder
-2. Prepare nodes for API (encrypt keys, create attributes)
-3. Send API request with a: 'p' to copy/import nodes
+1. For folders: Collect all nodes recursively from source folder
+2. For files: Use the file node directly
+3. Prepare nodes for API (encrypt keys, create attributes)
+4. Send API request with a: 'p' to copy/import nodes
 """
 import os
 import base64
@@ -26,9 +27,13 @@ logger = get_logger(__name__)
 
 class FolderImporter:
     """
-    Import folders with all children recursively.
+    Import folders or files from public links.
     
-    Single Responsibility: Handle the complete folder import process.
+    Single Responsibility: Handle the complete link import process.
+    
+    Supports:
+    - Folder links: Import folder with all children recursively
+    - File links: Import single file
     
     Based on webclient's:
     - importFolderLinkNodes: Entry point for folder import
@@ -56,6 +61,76 @@ class FolderImporter:
         self._node_service = node_service
         self._aes_crypto = AESCrypto(master_key)
     
+    async def import_link(
+        self,
+        source_node: Node,
+        target_folder_handle: str,
+        clear_attributes: bool = True
+    ) -> List[str]:
+        """
+        Import a folder or file from public link to target folder.
+        
+        Args:
+            source_node: Source Node (folder or file) to import
+            target_folder_handle: Target folder handle where to import
+            clear_attributes: If True, clear sensitive attributes (s4, lbl, fav, sen)
+            
+        Returns:
+            List of new node handles created
+            
+        Raises:
+            RuntimeError: If API call fails
+        """
+        if source_node.is_folder:
+            logger.info(f"Importing folder {source_node.name} ({source_node.handle}) "
+                       f"to {target_folder_handle}")
+            
+            # Step 1: Collect all nodes recursively
+            all_nodes = self._collect_nodes_recursive(source_node)
+            logger.debug(f"Collected {len(all_nodes)} nodes for import")
+            
+            # Step 2: Prepare nodes for API
+            prepared_nodes = self._prepare_nodes_for_import(
+                all_nodes,
+                source_node.handle,
+                target_folder_handle,
+                clear_attributes
+            )
+
+            print(prepared_nodes)
+            logger.debug(f"Prepared {len(prepared_nodes)} nodes for API")
+            
+            # Step 3: Calculate total size
+            total_size = sum(
+                node.size for node in all_nodes if not node.is_folder
+            )
+            logger.debug(f"Total size to import: {total_size} bytes")
+        else:
+            # Single file import - uses different API format
+            logger.info(f"Importing file {source_node.name} ({source_node.handle}) "
+                       f"to {target_folder_handle}")
+            
+            # For single files, use special format: ph, a (encrypted name), k (encrypted key)
+            handles = await self._execute_file_import(
+                source_node,
+                target_folder_handle,
+                clear_attributes
+            )
+            logger.info(f"Successfully imported file")
+            return handles
+        
+        # Step 4: Group nodes by target (for multi-target support)
+        nodes_by_target = {target_folder_handle: prepared_nodes}
+        
+        # Step 5: Create API requests and execute
+        result_handles = []
+        for target_handle, nodes in nodes_by_target.items():
+            handles = await self._execute_import(nodes, target_handle)
+            result_handles.extend(handles)
+        
+        logger.info(f"Successfully imported {len(result_handles)} node(s)")
+        return result_handles
+    
     async def import_folder(
         self,
         source_folder: Node,
@@ -64,6 +139,8 @@ class FolderImporter:
     ) -> List[str]:
         """
         Import a folder with all its children to target folder.
+        
+        DEPRECATED: Use import_link() instead. This method is kept for backward compatibility.
         
         Args:
             source_folder: Source folder Node to import
@@ -80,39 +157,7 @@ class FolderImporter:
         if not source_folder.is_folder:
             raise ValueError(f"Source must be a folder, got: {source_folder.handle}")
         
-        logger.info(f"Importing folder {source_folder.name} ({source_folder.handle}) "
-                   f"to {target_folder_handle}")
-        
-        # Step 1: Collect all nodes recursively
-        all_nodes = self._collect_nodes_recursive(source_folder)
-        logger.debug(f"Collected {len(all_nodes)} nodes for import")
-        
-        # Step 2: Prepare nodes for API
-        prepared_nodes = self._prepare_nodes_for_import(
-            all_nodes,
-            source_folder.handle,
-            target_folder_handle,
-            clear_attributes
-        )
-        logger.debug(f"Prepared {len(prepared_nodes)} nodes for API")
-        
-        # Step 3: Calculate total size
-        total_size = sum(
-            node.size for node in all_nodes if not node.is_folder
-        )
-        logger.debug(f"Total size to import: {total_size} bytes")
-        
-        # Step 4: Group nodes by target (for multi-target support)
-        nodes_by_target = {target_folder_handle: prepared_nodes}
-        
-        # Step 5: Create API requests and execute
-        result_handles = []
-        for target_handle, nodes in nodes_by_target.items():
-            handles = await self._execute_import(nodes, target_handle)
-            result_handles.extend(handles)
-        
-        logger.info(f"Successfully imported {len(result_handles)} nodes")
-        return result_handles
+        return await self.import_link(source_folder, target_folder_handle, clear_attributes)
     
     def _collect_nodes_recursive(self, folder: Node) -> List[Node]:
         """
@@ -188,21 +233,22 @@ class FolderImporter:
             else:
                 # Files keep their existing key
                 if node.key:
-                    manager = KeyFileManager.from_full_key(node.key, self._master_key[:24])
+                    manager = KeyFileManager.from_full_key(node.key, self._master_key)
                     node_data['k'] = manager.mega_key
             
             node_data["a"] = manager.encrypt_attributes(node.attributes)
             # Set parent (remove for root nodes)
             from megapy.core.utils import b64decode
-            print(manager.decrypt_attributes(b64decode(node_data["a"])))
-            if node.handle == source_root_handle:
-                # Root folder has no parent in target (will be set by API)
-                node_data['p'] = None
+            # For files, always set parent to None (will be set by API to target folder)
+            # For folders, only root folder has no parent
+            if node.is_file or node.handle == source_root_handle:
+                # Root folder or file: no parent in target (will be set by API)
+                node_data['p'] = node.parent.handle if node.parent else None
             else:
-                # Keep original parent relationship
+                # Keep original parent relationship for subfolders
                 # The API will handle remapping to new handles
-                node_data['p'] = node.parent_handle
-            
+                node_data['p'] = node.parent.handle if node.parent else None
+            print(node_data)
             prepared.append(node_data)
         
         # Note: Parent relationships will be remapped by the API
@@ -355,4 +401,75 @@ class FolderImporter:
         except Exception as e:
             logger.error(f"API import request failed: {e}")
             raise RuntimeError(f"Failed to import folder: {e}") from e
+    
+    async def _execute_file_import(
+        self,
+        file_node: Node,
+        target_handle: str,
+        clear_attributes: bool
+    ) -> List[str]:
+        """
+        Execute API import request for a single file.
+        
+        For single files, MEGA uses a different format:
+        - 'ph': public handle (instead of 'h')
+        - 'a': encrypted name (not full attributes)
+        - 'k': encrypted key
+        
+        Args:
+            file_node: File node to import
+            target_handle: Target folder handle
+            clear_attributes: If True, clear sensitive attributes
+            
+        Returns:
+            aArray of dictionaru jsut one file
+            [{
+                "ph": "Ht4xiDYB",
+                "t": 0,
+                "a": "RsdaSd0JMtIdOcTq0iF0OPT-6y5uJH6hDNpYTxAhz2DmzYAk2oeC2BzAIiB86Z6s",
+                "k": "in-EcMq4ZNI:JfXQMv4yKgIpw8TT6_FsmYUDMetNDpI12OLMAC3ZorE",
+                "h": "S0I0UJTI",
+                "p": "z9pVQK4D",
+            }]
+            where:
+            - ph: public handle
+            - t: type (0 for file)
+            - a: encrypted name
+            - k: encrypted key
+            - h: new handle
+            - p: parent handle
+        Raises:
+            RuntimeError: If API call fails
+        """
+        from megapy.core.nodes.key import KeyFileManager
+        from megapy.core.utils import b64encode
+        
+        if not file_node.key:
+            raise ValueError(f"File {file_node.handle} has no key")
+        manager = KeyFileManager.from_full_key(file_node.key, self._master_key)
+        encrypted_name = manager.encrypt_attributes(file_node.attributes)
+        encrypted_key = manager.mega_key
+        request_data = {
+            'a': 'p',  # Put nodes (copy/import)
+            't': target_handle,  # Target folder
+            'n': [{
+                'ph': file_node.handle,  # Public handle (not 'h')
+                't': 0,  # File type
+                'a': encrypted_name,  # Encrypted name
+                'k': encrypted_key  # Encrypted key
+            }]
+        }
+        
+        logger.debug(f"Sending single file import request for {file_node.handle} to {target_handle}")
+        
+        try:
+            result = await self._api_client.request(request_data)
+            
+            """ 
+            [{"f":[{"ph":"Ht4xiDYB","t":0,"a":"RsdaSd0JMtIdOcTq0iF0OPT-6y5uJH6hDNpYTxAhz2DmzYAk2oeC2BzAIiB86Z6s","k":"in-EcMq4ZNI:JfXQMv4yKgIpw8TT6_FsmYUDMetNDpI12OLMAC3ZorE","h":"S0I0UJTI","p":"z9pVQK4D","ts":1765120060,"u":"in-EcMq4ZNI","s":126824560,"fa":"482:8*V5ZJH-Qs1oQ/891:0*w6UEG1aiv8g/891:1*3j5iGm-5J5M"}]}]
+            """
+            return result['f']
+        except Exception as e:
+            logger.error(f"API file import request failed: {e}")
+            raise RuntimeError(f"Failed to import file: {e}") from e
 
