@@ -131,6 +131,7 @@ class FolderImporter:
         def collect_children(node: Node):
             """Recursively collect children."""
             for child in node.children:
+                print(child)
                 nodes.append(child)
                 if child.is_folder:
                     collect_children(child)
@@ -166,46 +167,34 @@ class FolderImporter:
             List of prepared node dictionaries for API
         """
         prepared = []
-        
         for node in nodes:
             # Create new node data
             node_data: Dict[str, Any] = {
                 'h': node.handle,  # Original handle
                 't': 1 if node.is_folder else 0,  # Type
             }
-            
+
+            from megapy.core.crypto import unmerge_key_mac
+            from megapy.core.crypto.aes import AESCrypto
+            from megapy.core.nodes.key import KeyFileManager
+            aes = AESCrypto(self._master_key)
             # Handle keys and prepare key for attributes
             key_for_attrs = None
             if node.is_folder:
                 # Folders get a new random key
                 new_key = os.urandom(16)
-                node_data['k'] = self._encrypt_key_for_api(new_key)
-                key_for_attrs = new_key
+                manager = KeyFileManager(new_key, self._master_key)
+                node_data['k'] = manager.mega_key
             else:
                 # Files keep their existing key
                 if node.key:
-                    node_data['k'] = self._encrypt_key_for_api(node.key[:16])
-                    key_for_attrs = node.key[:16]
-                else:
-                    # Fallback: generate new key if missing
-                    new_key = os.urandom(16)
-                    node_data['k'] = self._encrypt_key_for_api(new_key)
-                    key_for_attrs = new_key
+                    manager = KeyFileManager.from_full_key(node.key, self._master_key[:24])
+                    node_data['k'] = manager.mega_key
             
-            # Prepare attributes
-            attrs_dict = self._prepare_attributes(
-                node,
-                clear_attributes,
-                node.is_folder
-            )
-            
-            if key_for_attrs:
-                encrypted_attrs = AttributesPacker.pack(attrs_dict, key_for_attrs)
-                node_data['a'] = Base64Encoder().encode(encrypted_attrs)
-            else:
-                raise ValueError(f"Missing key for node {node.handle}")
-            
+            node_data["a"] = manager.encrypt_attributes(node.attributes)
             # Set parent (remove for root nodes)
+            from megapy.core.utils import b64decode
+            print(manager.decrypt_attributes(b64decode(node_data["a"])))
             if node.handle == source_root_handle:
                 # Root folder has no parent in target (will be set by API)
                 node_data['p'] = None

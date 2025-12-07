@@ -2,7 +2,8 @@
 import json
 from typing import Dict, Any, Optional, Tuple
 from Crypto.Cipher import AES
-from ..crypto import Base64Encoder
+from ..crypto import Base64Encoder, unmerge_key_mac, merge_key_mac
+from megapy.core.attributes.packer import AttributesPacker
 
 
 class KeyDecryptor:

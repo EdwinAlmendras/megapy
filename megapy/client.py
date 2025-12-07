@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union, Callable
 from dataclasses import dataclass, field
-
+from .core.nodes.key import KeyFileManager
 from .core.api import (
     AsyncAPIClient,
     AsyncAuthService,
@@ -35,6 +35,9 @@ from .node import Node
 MegaFile = Node
 MegaNode = Node
 
+
+import logging
+logger = logging.getLogger(__name__)
 
 @dataclass  
 class UserInfo:
@@ -362,7 +365,8 @@ class MegaClient:
             session_id=self._auth_result.session_id,
             user_id=self._auth_result.user_id,
             user_name=self._auth_result.user_name,
-            master_key=self._auth_result.master_key
+            master_key=self._auth_result.master_key,
+            private_key=self._auth_result.private_key
         )
         self._session.save(session_data)
         
@@ -391,7 +395,8 @@ class MegaClient:
                 user_id=session_data.user_id,
                 user_name=user_info.get('name', session_data.user_name),
                 email=session_data.email,
-                master_key=session_data.master_key
+                master_key=session_data.master_key,
+                private_key=session_data.private_key
             )
             
             # Update session with latest info
@@ -1413,46 +1418,6 @@ class MegaClient:
         if not source.is_folder:
             raise ValueError(f"Source must be a folder, got: {source.handle}")
         
-        # If source is a public folder URL without children loaded, try to load them
-        if source._raw and source._raw.get('_public_url') and not source.children:
-            # For public folders, we need to use the API with the key from URL
-            # The key from URL is the share key, we need to use it in the API call
-            try:
-                # Parse URL to get handle and key
-                import re
-                from urllib.parse import urlparse
-                import base64
-                import binascii
-                
-                parsed = urlparse(source._raw['_public_url'])
-                folder_match = re.search(r'/folder/([^#/?]+)', parsed.path)
-                if folder_match:
-                    handle = folder_match.group(1)
-                    key_str = parsed.fragment
-                    
-                    # Decode key
-                    padding = len(key_str) % 4
-                    if padding:
-                        key_str += '=' * (4 - padding)
-                    key_bytes = base64.urlsafe_b64decode(key_str)
-                    
-                    # Try to get folder nodes using the key
-                    # For public folders, we might need to pass the key differently
-                    # Let's try using 'a: f' with the handle and see if it works when authenticated
-                    result = await self._api.request({
-                        'a': 'f',
-                        'c': 1,
-                        'n': handle
-                    })
-                    
-                    if 'f' in result and result['f']:
-                        # Load children from API result
-                        self._load_children_from_api_result(source, result['f'], key_bytes)
-            except Exception as e:
-                self._logger.warning(f"Could not load children for public folder: {e}")
-                # Continue anyway - the import might still work
-        
-        # Resolve target folder
         target = await self._resolve_file(target_folder)
         if not target:
             raise FileNotFoundError(f"Target folder not found: {target_folder}")
@@ -1460,7 +1425,6 @@ class MegaClient:
         if not target.is_folder:
             raise ValueError(f"Target must be a folder, got: {target.handle}")
         
-        # Import using FolderImporter
         from .core.nodes.folder_importer import FolderImporter
         
         importer = FolderImporter(
@@ -1476,17 +1440,6 @@ class MegaClient:
             clear_attributes=clear_attributes
         )
         
-        # Reload nodes to get the new imported nodes
-        await self._load_nodes()
-        
-        # Return imported nodes
-        imported_nodes = []
-        for handle in handles:
-            node = self._node_service.get(handle)
-            if node:
-                imported_nodes.append(node)
-        
-        return imported_nodes
     
     async def init_register(
         self,
@@ -1737,12 +1690,15 @@ class MegaClient:
         import binascii
         from urllib.parse import urlparse
         
+        logger.debug(f"Resolving MEGA URL: {url}")
+        
         # Parse URL
         parsed = urlparse(url)
         path = parsed.path
         fragment = parsed.fragment
         
         if not fragment:
+            logger.error(f"Missing key in MEGA URL: {url}")
             raise ValueError(f"Missing key in MEGA URL: {url}")
         
         # Extract handle and type from path
@@ -1752,10 +1708,13 @@ class MegaClient:
         if folder_match:
             handle = folder_match.group(1)
             is_folder = True
+            logger.debug(f"Detected folder URL, handle: {handle}")
         elif file_match:
             handle = file_match.group(1)
             is_folder = False
+            logger.debug(f"Detected file URL, handle: {handle}")
         else:
+            logger.error(f"Invalid MEGA URL format: {url}")
             raise ValueError(f"Invalid MEGA URL format: {url}")
         
         # Decode key from fragment
@@ -1764,21 +1723,19 @@ class MegaClient:
         padding = len(key_str) % 4
         if padding:
             key_str += '=' * (4 - padding)
+            logger.debug(f"Padded key string for base64 decoding (padding: {4 - padding})")
         
         try:
             key_bytes = base64.urlsafe_b64decode(key_str)
-        except (binascii.Error, ValueError):
+            logger.debug(f"Successfully decoded key from URL fragment (key length: {len(key_bytes)} bytes)")
+        except (binascii.Error, ValueError) as e:
+            logger.error(f"Failed to decode key from MEGA URL: {url}, error: {e}")
             raise ValueError(f"Invalid key in MEGA URL: {url}")
         
         # For folders, we need to fetch the folder info
         if is_folder:
-            # For public folders, we can't use 'a: f' directly because we don't have access
-            # Instead, we create a minimal Node with the handle and key from URL
-            # The import process will handle getting the nodes using the API with the key
+            logger.info(f"Resolving folder URL, handle: {handle}")
             from .node import Node
-            
-            # Create a minimal folder node with handle and key from URL
-            # The actual folder structure will be loaded during import
             folder_node = Node(
                 handle=handle,
                 name=f"Folder-{handle}",  # Temporary name
@@ -1798,53 +1755,63 @@ class MegaClient:
             # Store the URL in _raw for later use during import
             folder_node._raw['_public_url'] = url
             
-            # Try to get folder info if we're authenticated
-            # This might work for folders we have access to
-            try:
-                result = await self._api.request({
-                    'a': 'f',
-                    'c': 1,
-                    'n': handle
-                })
-                
-                if 'f' in result and result['f']:
-                    # Find the folder in response
-                    for node_data in result['f']:
-                        if node_data.get('h') == handle and node_data.get('t') == 1:
-                            # Update with real data
-                            folder_node._raw = node_data
-                            
-                            # Try to decrypt name
-                            from .core.attributes.packer import AttributesPacker
-                            from .core.crypto import Base64Encoder
-                            encoder = Base64Encoder()
-                            
-                            if node_data.get('a') and key_bytes:
-                                try:
-                                    attrs_encrypted = encoder.decode(node_data['a'])
-                                    attrs = AttributesPacker.unpack(attrs_encrypted, key_bytes[:16])
-                                    if attrs:
-                                        folder_node.name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', folder_node.name)
-                                except Exception:
-                                    pass
-                            
-                            # Load children if available
-                            self._load_children_from_api_result(folder_node, result['f'], key_bytes)
-                            break
-            except Exception:
-                # If we can't get folder info (e.g., public folder without access),
-                # that's OK - the import process will handle it using the URL
-                pass
+            logger.debug(f"Requesting folder info from API for handle: {handle}")
+            result = await self._api.request({
+                'a': 'f',
+                'c': 1,
+                'r': 1,
+                'ca': 1
+            }, querystring={'n': handle})
+
+            if isinstance(result, list):
+                nodes = result[0]["f"]
+            else:
+                nodes = result["f"]
             
+            logger.debug(f"Received {len(nodes)} nodes from API response")
+            
+            print(nodes)
+            node_data = nodes[0]
+                
+            logger.debug(f"Found matching folder node, updating with real data")
+            # Update with real data
+            folder_node._raw = node_data
+            folder_node.handle = node_data["h"]
+            # Try to decrypt name
+            from .core.attributes.packer import AttributesPacker
+            from .core.crypto import Base64Encoder
+            from .core.nodes.key import KeyFileManager
+            encoder = Base64Encoder()
+            
+            if node_data.get('a') and key_bytes:
+                manager = KeyFileManager.parse_key(node_data["k"], key_bytes)
+                attrs = manager.decrypt_attributes(encoder.decode(node_data['a']))
+                folder_node.attributes = attrs
+                if attrs:
+                    folder_node.name = attrs.name
+                    logger.debug(f"Successfully decrypted folder name: {folder_node.name}")
+                else:
+                    raise ValueError(f"Failed to decrypt folder attributes for handle: {handle}")
+
+            logger.debug(f"Loading children nodes for folder: {folder_node.name}")
+
+            self._load_children_from_api_result(folder_node, nodes, key_bytes)
+            logger.info(f"Successfully resolved folder URL: {folder_node.name} ({handle})")
+    
+           
             return folder_node
         
         # For files, we can create a Node directly
         else:
+            logger.info(f"Resolving file URL, handle: {handle}")
             try:
+                logger.debug(f"Requesting file info from API for handle: {handle}")
                 result = await self._api.request({
                     'a': 'g',
                     'p': handle
                 })
+                
+                logger.debug(f"Received file info from API: size={result.get('s', 0)}")
                 
                 from .node import Node
                 file_node = Node(
@@ -1864,15 +1831,20 @@ class MegaClient:
                     from .core.crypto import Base64Encoder
                     encoder = Base64Encoder()
                     if result.get('a') and key_bytes:
+                        logger.debug(f"Attempting to decrypt file attributes")
                         attrs_encrypted = encoder.decode(result['a'])
                         attrs = AttributesPacker.unpack(attrs_encrypted, key_bytes[:16])
                         if attrs:
                             file_node.name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', handle)
-                except Exception:
+                            logger.debug(f"Successfully decrypted file name: {file_node.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to decrypt file attributes: {e}, keeping default name")
                     pass  # Keep default name if decryption fails
                 
+                logger.info(f"Successfully resolved file URL: {file_node.name} ({handle}), size: {file_node.size}")
                 return file_node
             except Exception as e:
+                logger.error(f"Failed to resolve public file URL: {url}, error: {e}")
                 self._logger.warning(f"Failed to resolve public file URL: {e}")
                 raise ValueError(f"Could not access public file: {url}")
         
@@ -1885,68 +1857,94 @@ class MegaClient:
         from .core.crypto import Base64Encoder
         encoder = Base64Encoder()
         
-        def process_children(parent_handle: str, parent_key: bytes):
+        logger.debug(f"Loading children for folder: {folder_node.name} (handle: {folder_node.handle}), total nodes in result: {len(all_nodes)}")
+        
+        def process_children(parent_node: 'Node', parent_key: bytes, depth: int = 0):
             """Recursively process children nodes."""
+            indent = "  " * depth
+            children_count = 0
             for child_data in all_nodes:
-                if child_data.get('p') == parent_handle:
-                    # Decrypt child key
-                    child_key = self._decrypt_child_key(child_data, parent_key)
+                if child_data.get('p') == parent_node.handle:
+                    children_count += 1
+                    child_handle = child_data.get('h', '')
+                    is_child_folder = (child_data.get('t', 0) == 1)
+                    logger.debug(f"{indent}Processing child: handle={child_handle}, type={'folder' if is_child_folder else 'file'}")
                     
-                    # Decrypt attributes
-                    child_name = child_data.get('h', '')
-                    if child_data.get('a') and child_key:
-                        try:
-                            attrs_encrypted = encoder.decode(child_data['a'])
-                            child_attrs = AttributesPacker.unpack(attrs_encrypted, child_key[:16])
-                            if child_attrs:
-                                child_name = child_attrs.name if hasattr(child_attrs, 'name') else child_attrs.to_dict().get('n', child_name)
-                        except Exception:
-                            pass
-                    
+                    manager = KeyFileManager.parse_key(child_data.get('k'), parent_key)
+                    attributes = manager.decrypt_attributes(
+                        encoder.decode(child_data.get('a', ''))
+                    )
                     # Create child node
                     child_node = Node(
-                        handle=child_data.get('h', ''),
-                        name=child_name,
+                        handle=child_handle,
+                        name=attributes.name,
+                        attributes=attributes,
                         size=child_data.get('s', 0),
-                        is_folder=(child_data.get('t', 0) == 1),
-                        parent_handle=parent_handle,
-                        key=child_key,
+                        is_folder=is_child_folder,
+                        parent_handle=parent_node.handle,
+                        key=manager.full_key,
                         _client=self,
                         _raw=child_data
                     )
                     
-                    folder_node.children.append(child_node)
+                    # Set parent relationship
+                    child_node.parent = parent_node
+                    # Add to parent's children (not folder_node!)
+                    parent_node.children.append(child_node)
                     
-                    # If it's a folder, process its children recursively
+                    # If it's a folder, recursively process its children
+                    # Always use parent_key (master_key) for all children, not the child's key
                     if child_node.is_folder:
-                        process_children(child_node.handle, child_key)
+                        process_children(child_node, parent_key, depth + 1)
+            
+            if children_count > 0:
+                logger.debug(f"{indent}Processed {children_count} children for parent: {parent_node.handle} ({parent_node.name})")
         
-        process_children(folder_node.handle, parent_key)
+        process_children(folder_node, parent_key)
+        logger.info(f"Finished loading children for folder: {folder_node.name}, total children: {len(folder_node.children)}")
     
     def _decrypt_child_key(self, child_data: Dict[str, Any], parent_key: bytes) -> bytes:
         """Decrypt a child node's key using parent folder key."""
         from .core.crypto.aes.aes_crypto import AESCrypto
         
+        child_handle = child_data.get('h', 'unknown')
+        
         # Child key is encrypted with parent key
         encrypted_key = child_data.get('k', '')
         if not encrypted_key:
+            logger.debug(f"No encrypted key found for child {child_handle}, using parent key as fallback")
             return parent_key  # Fallback to parent key
         
         # Parse key: "handle:encrypted_key"
         if ':' in encrypted_key:
             _, enc_key_part = encrypted_key.split(':', 1)
+            logger.debug(f"Parsed encrypted key for child {child_handle} (format: handle:key)")
         else:
             enc_key_part = encrypted_key
+            logger.debug(f"Using encrypted key directly for child {child_handle} (no handle prefix)")
         
         # Decode and decrypt
         try:
             from .core.crypto.utils.encoding import Base64Encoder
             encoder = Base64Encoder()
             enc_key_bytes = encoder.decode(enc_key_part)
-            
-            aes = AESCrypto(parent_key)
-            decrypted_key = aes.decrypt_ecb(enc_key_bytes)
-            
+            logger.debug(f"Decoded encrypted key bytes for child {child_handle} (length: {len(enc_key_bytes)} bytes)")
+            logger.info(f"Decrypting child key for {child_handle} using parent key, key length: {len(parent_key)} bytes")
+
+            if len(enc_key_bytes) <= 32:
+                aes = AESCrypto(parent_key)
+                decrypted_key = aes.decrypt_ecb(enc_key_bytes)
+                logger.debug(f"Successfully decrypted child key for {child_handle}")
+            else:
+                raise ValueError("Encrypted key only can be decrypted with rsa key.")
+ 
             return decrypted_key
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to decrypt child key for {child_handle}: {e}, using parent key as fallback")
             return parent_key  # Fallback
+
+
+def get_file_key(key):
+    if len(key) >= 32:
+        return bytes(a ^ b for a, b in zip(key[:16], key[16:32]))
+    return key[:16]

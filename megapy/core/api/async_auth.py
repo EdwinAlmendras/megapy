@@ -24,7 +24,7 @@ class AuthResult:
     user_name: str
     email: str
     master_key: bytes
-
+    private_key: bytes
 
 class AsyncAuthService:
     """
@@ -95,7 +95,6 @@ class AsyncAuthService:
         # Step 6: Decrypt private key and session ID
         aes = AES.new(master_key, AES.MODE_ECB)
         private_key = aes.decrypt(self._encoder.decode(login_data['privk']))
-        
         sid_raw = self._rsa_service.decrypt(private_key, login_data['csid'])
         sid_hex = '0' + sid_raw if len(sid_raw) % 2 else sid_raw
         session_id = self._encoder.encode(binascii.unhexlify(sid_hex)[:43])
@@ -111,7 +110,8 @@ class AsyncAuthService:
             user_id=user_info.get('u', ''),
             user_name=user_info.get('name', ''),
             email=email,
-            master_key=master_key
+            master_key=master_key,
+            private_key=private_key
         )
     
     async def logout(self):
