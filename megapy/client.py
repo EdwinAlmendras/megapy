@@ -1864,17 +1864,30 @@ class MegaClient:
             from .core.nodes.key import KeyFileManager
             encoder = Base64Encoder()
             node_data = result
-            print(node_data)
-            if node_data.get('at') and key_bytes:
-                manager = KeyFileManager.from_merged_key(key_bytes, self._master_key)
-                attrs = manager.decrypt_attributes(encoder.decode(node_data['at']))
-                file_node.key = manager.full_key
-                print(attrs, "ATTRIBUTRES")
-                file_node.attributes = attrs
-                if attrs:
-                    file_node.name = attrs.name
-                else:
-                    raise ValueError(f"Failed to decrypt folder attributes for handle: {handle}")
+            
+            # Try to decrypt attributes
+            if node_data.get('a') and key_bytes:
+                try:
+                    # For files, the key in the URL is the encrypted key, need to decrypt it first
+                    # The key_bytes from URL is the master key for the file link
+                    # We need to parse the key from the API response
+                    if node_data.get('k'):
+                        # Parse the key from API response format: "user:encrypted_key"
+                        manager = KeyFileManager.parse_key(node_data['k'], key_bytes)
+                    else:
+                        # If no 'k' in response, use key_bytes directly as file key
+                        # For file links, key_bytes might be the file key itself
+                        manager = KeyFileManager.from_full_key(key_bytes, self._master_key)
+                    
+                    attrs = manager.decrypt_attributes(encoder.decode(node_data['a']))
+                    file_node.key = manager.full_key
+                    file_node.attributes = attrs
+                    if attrs:
+                        file_node.name = attrs.name if hasattr(attrs, 'name') else attrs.to_dict().get('n', handle)
+                        logger.debug(f"Successfully decrypted file name: {file_node.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to decrypt file attributes: {e}, keeping default name")
+                    # Keep default name if decryption fails
             logger.info(f"Successfully resolved file URL: {file_node.name} ({handle}), size: {file_node.size}")
             return file_node
 

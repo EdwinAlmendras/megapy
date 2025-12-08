@@ -96,6 +96,7 @@ class NodeService:
             
             # Decrypt attributes
             attrs = self._decryptor.decrypt_attributes(data, key)
+            
             name = attrs.get('n', handle)
             
             # Handle root folder
@@ -115,6 +116,7 @@ class NodeService:
                 _client=self._client,
                 _raw=data
             )
+
             
             if node_type == self.NODE_TYPE_ROOT:
                 self._root = node
