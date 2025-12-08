@@ -364,8 +364,8 @@ class Node:
         if not self.is_folder:
             raise ValueError(f"Cannot import into a file. This node is not a folder: {self.name}")
         
-        return await self._client.import_folder(
-            source_folder=source,
+        return await self._client.import_link(
+            source_node=source,
             target_folder=self,
             clear_attributes=clear_attributes
         )

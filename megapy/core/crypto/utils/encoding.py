@@ -21,3 +21,7 @@ class Base64Encoder:
         if padding:
             data += '=' * (4 - padding)
         return base64.b64decode(data)
+    
+
+
+

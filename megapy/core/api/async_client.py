@@ -147,7 +147,8 @@ class AsyncAPIClient:
     async def request(
         self,
         data: Dict[str, Any],
-        retry_count: int = 0
+        retry_count: int = 0,
+        querystring: Optional[Dict[str, str]] = None
     ) -> Any:
         """
         Make async request to MEGA API with automatic batching.
@@ -158,6 +159,8 @@ class AsyncAPIClient:
         Args:
             data: Request data
             retry_count: Current retry attempt (internal use)
+            querystring: Optional query string parameters to add to URL
+                        (e.g., {"n": "node_id"}). Can also be passed in data as '_querystring'
             
         Returns:
             API response data
@@ -167,6 +170,16 @@ class AsyncAPIClient:
         """
         if self._closed:
             raise MegaAPIError(-1, "Client is closed")
+        
+        # Add querystring to data if provided (merge with existing _querystring if any)
+        if querystring:
+            existing_qs = data.get('_querystring', {})
+            if isinstance(existing_qs, dict):
+                # Merge querystrings (parameter takes precedence)
+                merged_qs = {**existing_qs, **querystring}
+            else:
+                merged_qs = querystring
+            data['_querystring'] = merged_qs
         
         # For immediate requests (with special flags) or if retrying, don't batch
         immediate = data.get('_immediate', False) or retry_count > 0

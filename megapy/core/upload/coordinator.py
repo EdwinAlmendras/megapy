@@ -128,6 +128,12 @@ class UploadCoordinator:
         finally:
             await chunk_uploader.close()
             logger.debug("Upload session closed")
+            
+            # Force garbage collection after upload to free memory
+            # This is critical for large files to prevent memory accumulation
+            import gc
+            gc.collect()
+            logger.debug("Garbage collection completed after chunk upload")
         
         # Step 6: Get original key (24 bytes) for thumbnail encryption
         # and finalize to get the 32-byte file key for node creation
@@ -443,8 +449,11 @@ class UploadCoordinator:
                         try:
                             await task
                             chunks_completed += 1
+                            # Explicitly remove task reference to help GC
+                            active_uploads.discard(task)
                         except Exception as e:
                             logger.error(f"Chunk upload failed: {e}")
+                            active_uploads.discard(task)
                             raise
             
             # CRITICAL: Wait for ALL remaining uploads to complete before returning
@@ -507,9 +516,14 @@ class UploadCoordinator:
             Upload token (empty string for intermediate chunks, token for last chunk)
         """
         try:
-            result = await uploader.upload_chunk(index, start, encrypted_chunk)
-            elapsed = time.time() - start_time
             chunk_size_kb = len(encrypted_chunk) / 1024
+            result = await uploader.upload_chunk(index, start, encrypted_chunk)
+            
+            # CRITICAL: Explicitly release encrypted chunk from memory after upload
+            # This prevents memory accumulation when uploading multiple files
+            del encrypted_chunk
+            
+            elapsed = time.time() - start_time
             speed_kbps = (chunk_size_kb / elapsed) if elapsed > 0 else 0
             
             # Log if this chunk returned a token (last chunk)
@@ -523,6 +537,10 @@ class UploadCoordinator:
             elapsed = time.time() - start_time
             logger.error(f"Chunk {index} failed after {elapsed:.2f}s: {e}", exc_info=True)
             raise
+        finally:
+            # Ensure encrypted_chunk is released even if exception occurs
+            if 'encrypted_chunk' in locals():
+                del encrypted_chunk
     
     def _extract_node_handle(self, response: Dict[str, Any]) -> str:
         """Extract node handle from API response."""

@@ -45,14 +45,10 @@ class AttributesPacker:
             attrs_dict = attributes.to_dict()
         else:
             attrs_dict = attributes
-        
         # Convert to JSON
         json_str = json.dumps(attrs_dict, separators=(',', ':'))
-        
         # Add MEGA prefix
         data = AttributesPacker.PREFIX + json_str.encode('utf-8')
-        
-        # Pad to 16-byte boundary
         padding_len = (16 - (len(data) % 16)) % 16
         if padding_len == 0:
             padding_len = 16  # Always add some padding
@@ -79,32 +75,26 @@ class AttributesPacker:
         Returns:
             FileAttributes or None if decryption fails
         """
-        try:
-            # Decrypt
-            cipher = AES.new(key[:16], AES.MODE_CBC, iv=b'\x00' * 16)
-            decrypted = cipher.decrypt(encrypted)
+        # Decrypt
+        cipher = AES.new(key[:16], AES.MODE_CBC, iv=b'\x00' * 16)
+        decrypted = cipher.decrypt(encrypted)
+        if not decrypted.startswith(AttributesPacker.PREFIX):
+            raise ValueError("Invalid attributes prefix")
+        
+        # Remove prefix and null padding
+        json_data = decrypted[4:]
+        
+        # Find end of JSON (null terminator)
+        end = 0
+        while end < len(json_data) and json_data[end] != 0:
+            end += 1
+        
+        json_str = json_data[:end].decode('utf-8')
+        
+        # Parse JSON
+        attrs_dict = json.loads(json_str)
+        return FileAttributes.from_dict(attrs_dict)
             
-            # Check prefix
-            if not decrypted.startswith(AttributesPacker.PREFIX):
-                return None
-            
-            # Remove prefix and null padding
-            json_data = decrypted[4:]
-            
-            # Find end of JSON (null terminator)
-            end = 0
-            while end < len(json_data) and json_data[end] != 0:
-                end += 1
-            
-            json_str = json_data[:end].decode('utf-8')
-            
-            # Parse JSON
-            attrs_dict = json.loads(json_str)
-            
-            return FileAttributes.from_dict(attrs_dict)
-            
-        except Exception:
-            return None
     
     @staticmethod
     def pack_raw(

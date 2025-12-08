@@ -50,7 +50,7 @@ class FileAttributes:
     label: int = 0  # lbl
     favorite: bool = False  # fav
     mega_id: Optional[str] = None  # m (links to MongoDB)
-    
+    c: Optional[str] = None  # c (checksum, optional)
     # Extra custom attributes (flat, single-char keys)
     _extra: Dict[str, Any] = field(default_factory=dict)
     
