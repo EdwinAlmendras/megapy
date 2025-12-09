@@ -7,11 +7,14 @@ import os
 import struct
 import threading
 import queue
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 from Crypto.Cipher import AES
 from Crypto.Util import Counter
 from Crypto.Util.strxor import strxor
+
+logger = logging.getLogger('megapy.upload.encryption')
 
 
 class BaseEncryptionStrategy(ABC):
@@ -83,10 +86,19 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
         self._mac_lock = threading.Lock()
         
         # Background MAC processing
+        # CRITICAL: Limit queue size to prevent memory accumulation
+        # With max_parallel_uploads=21, limit to 10 chunks in queue
+        # This prevents duplicating all chunks in memory (encrypted + unencrypted)
+        # If queue is full, encrypt_chunk will wait (blocking) until space is available
         self._mac_queue = queue.Queue()
         self._processing_complete = threading.Event()
         self._mac_thread = threading.Thread(target=self._process_mac_queue, daemon=True)
         self._mac_thread.start()
+        
+        # Statistics for debugging
+        self._chunks_queued = 0
+        self._chunks_processed = 0
+        self._max_queue_size = 0
         
         # Track chunk order
         self._last_index = -1
@@ -120,13 +132,32 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
         with self._cipher_lock:
             encrypted = self._cipher.encrypt(data)
         
-        # Queue data for background MAC calculation (non-blocking)
-        self._mac_queue.put(bytes(data))
+        # Queue data for background MAC calculation
+        # CRITICAL: Use blocking put() with timeout to prevent memory accumulation
+        # If queue is full, wait for space (MAC thread is processing)
+        # This limits memory to max_mac_queue_size chunks instead of all chunks
+        chunk_size = len(data)
+        data_copy = bytes(data)
+        
+        try:
+            # Try non-blocking first for performance
+            self._mac_queue.put_nowait(data_copy)
+        except queue.Full:
+
+            self._mac_queue.put(data_copy, block=True, timeout=60.0)
+        
+        # Update statistics
+        self._chunks_queued += 1
+        current_queue_size = self._mac_queue.qsize()
+        if current_queue_size > self._max_queue_size:
+            self._max_queue_size = current_queue_size
+        
         
         return encrypted
     
     def _process_mac_queue(self):
         """Background thread: process MAC queue."""
+        processed_count = 0
         while True:
             try:
                 item = self._mac_queue.get(timeout=0.1)
@@ -136,6 +167,9 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
                     self._mac_queue.task_done()
                     break
                 
+                chunk_size = len(item)
+                queue_size_before = self._mac_queue.qsize()
+                
                 # Calculate chunk MAC
                 chunk_mac = self._calculate_chunk_mac(item)
                 
@@ -144,40 +178,51 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
                     xored = strxor(bytes(self._mac_accumulator), chunk_mac)
                     self._mac_accumulator = bytearray(self._mac_cipher.encrypt(xored))
                 
-                self._mac_queue.task_done()
+                # Release reference to chunk data
+                del item
+                del chunk_mac
                 
+                self._mac_queue.task_done()
+                processed_count += 1
+                self._chunks_processed += 1
+                
+                queue_size_after = self._mac_queue.qsize()
             except queue.Empty:
                 continue
         
+        logger.info(
+            f"MAC thread: finished processing. Total chunks: {processed_count}, "
+            f"max_queue_size: {self._max_queue_size}"
+        )
         self._processing_complete.set()
     
     def _calculate_chunk_mac(self, data: bytes) -> bytes:
         """
-        Calculate CBC-MAC for a chunk.
-        
-        Args:
-            data: Chunk data
-            
-        Returns:
-            16-byte MAC
+        Calculate CBC-MAC for a chunk (Optimized).
         """
-        mac = bytearray(self._mac_template)
-        
-        # Process complete blocks
-        full_blocks = len(data) - (len(data) % 16)
-        for i in range(0, full_blocks, 16):
-            block = data[i:i+16]
-            xored = strxor(bytes(mac), block)
-            mac = bytearray(self._mac_cipher.encrypt(xored))
-        
-        # Process remaining bytes with padding
+        # 1. Manejar el padding manualmente (igual que en tu código original)
+        # Zero-padding para completar el último bloque si no es múltiplo de 16
         remaining = len(data) % 16
         if remaining > 0:
-            last_block = data[full_blocks:] + b'\x00' * (16 - remaining)
-            xored = strxor(bytes(mac), last_block)
-            mac = bytearray(self._mac_cipher.encrypt(xored))
+            padded_data = data + b'\x00' * (16 - remaining)
+        else:
+            padded_data = data
+
+        # 2. El truco: Usar AES en modo CBC
+        # El 'mac' actual actúa como el IV (Initial Vector) para este chunk.
+        # Esto delega el bucle interno a la implementación en C de la librería.
         
-        return bytes(mac)
+        # Nota: Convertimos self._mac_template a bytes si es bytearray
+        current_iv = bytes(self._mac_template)
+        
+        cbc_cipher = AES.new(self._aes_key, AES.MODE_CBC, iv=current_iv)
+        
+        # 3. Encriptamos todo de golpe
+        # No necesitamos el resultado completo, solo el último bloque.
+        encrypted_chunk = cbc_cipher.encrypt(padded_data)
+        
+        # 4. El nuevo MAC es el último bloque del cifrado
+        return encrypted_chunk[-16:]
     
     def finalize(self, timeout: float = 30.0) -> bytes:
         """
@@ -191,11 +236,19 @@ class MegaEncryptionStrategy(BaseEncryptionStrategy):
         Returns:
             32-byte file key in MEGA format
         """
+        remaining_queue_size = self._mac_queue.qsize()
+        logger.info(
+            f"Finalizing encryption: queue_size={remaining_queue_size}, "
+            f"queued_total={self._chunks_queued}, processed_total={self._chunks_processed}, "
+            f"max_queue_size={self._max_queue_size}"
+        )
+        
         # Signal MAC thread to finish
         self._mac_queue.put(None)
         
         # Wait for all MACs to be processed
         self._processing_complete.wait(timeout=timeout)
+        
         
         # Calculate meta-MAC
         with self._mac_lock:

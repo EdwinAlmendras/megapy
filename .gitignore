@@ -3,6 +3,7 @@ test_files
 mega
 legacy
 test.*
+test_*.py
 mega_api/
 mega-api/
 webclient/
