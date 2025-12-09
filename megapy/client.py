@@ -1297,6 +1297,158 @@ class MegaClient:
         
         return mega_file
     
+    async def link(self, node: Union[str, MegaFile], no_key: bool = False) -> str:
+        """
+        Get public link for a node.
+        
+        Args:
+            node: Node or node handle
+            no_key: If True, don't include key in URL (for folders with share key)
+            
+        Returns:
+            Public MEGA URL (e.g., "https://mega.nz/file/...#key")
+            
+        Example:
+            >>> file = await mega.get_file("document.pdf")
+            >>> url = await mega.link(file)
+            >>> print(url)  # https://mega.nz/file/...#key
+        """
+        self._ensure_logged_in()
+        
+        mega_file = await self._resolve_file(node)
+        if not mega_file:
+            raise FileNotFoundError(f"Node not found: {node}")
+        
+        # Get link ID from API
+        link_id = await self._api.get_link(mega_file.handle)
+        
+        # Build URL
+        from .core.crypto import Base64Encoder
+        encoder = Base64Encoder()
+        
+        if mega_file.is_folder:
+            url = f"https://mega.nz/folder/{link_id}"
+        else:
+            url = f"https://mega.nz/file/{link_id}"
+        
+        # Add key to URL if not no_key and key exists
+        if not no_key and mega_file.key:
+            key_str = encoder.encode(mega_file.key)
+            url += f"#{key_str}"
+        
+        return url
+    
+    async def share_folder(
+        self,
+        folder: Union[str, MegaFile],
+        share_key: Optional[bytes] = None
+    ) -> str:
+        """
+        Share a folder and get its public link.
+        
+        This creates a share key for the folder and generates a shareable link.
+        
+        Args:
+            folder: Folder node or handle
+            share_key: Optional 16-byte share key. If not provided, a random one is generated.
+            
+        Returns:
+            Public MEGA folder URL (e.g., "https://mega.nz/folder/...#sharekey")
+            
+        Example:
+            >>> folder = await mega.get_folder("Documents")
+            >>> url = await mega.share_folder(folder)
+            >>> print(url)  # https://mega.nz/folder/...#sharekey
+        """
+        self._ensure_logged_in()
+        
+        if not self._master_key:
+            raise RuntimeError("Master key not available. Client must be logged in.")
+        
+        mega_folder = await self._resolve_file(folder)
+        if not mega_folder:
+            raise FileNotFoundError(f"Folder not found: {folder}")
+        
+        if not mega_folder.is_folder:
+            # For files, just return the regular link
+            return await self.link(mega_folder)
+        
+        # Generate or use provided share key
+        import os
+        if share_key is None:
+            share_key = os.urandom(16)
+        elif len(share_key) != 16:
+            raise ValueError("Share key must be 16 bytes")
+        
+        # Encrypt share key with master key using AES-ECB
+        from .core.crypto.aes.aes_crypto import AESCrypto
+        from .core.crypto import Base64Encoder
+        encoder = Base64Encoder()
+        
+        aes = AESCrypto(self._master_key)
+        encrypted_share_key = aes.encrypt_ecb(share_key)
+        encrypted_share_key_b64 = encoder.encode(encrypted_share_key)
+        
+        # Create auth key: handler + handler, encrypted with AES-ECB
+        handler = mega_folder.handle.encode('utf-8')
+        auth_key_data = handler + handler
+        auth_key_encrypted = aes.encrypt_ecb(auth_key_data)
+        auth_key_b64 = encoder.encode(auth_key_encrypted)
+        
+        # Create crypto request
+        # Format: [shares, nodes, keys]
+        # shares: list of share handles (empty for new share, but we need to include the new share)
+        # nodes: list of node handles to share
+        # keys: flat array of [share_index, node_index, encrypted_key, ...]
+        # For a new share, shares is empty, but we encrypt the node key with the new share key
+        crypto_request = [
+            [],  # shares (empty for new share)
+            [mega_folder.handle],  # nodes to share
+            []  # keys (will be populated)
+        ]
+        
+        # Encrypt folder key with share key
+        # For new shares, share_index is 0 (first share)
+        if mega_folder.key:
+            folder_key = mega_folder.key
+            # For 32-byte keys, use first 16 bytes (or XOR first 16 with second 16)
+            if len(folder_key) >= 32:
+                folder_key_16 = bytes(a ^ b for a, b in zip(folder_key[:16], folder_key[16:32]))
+            elif len(folder_key) >= 16:
+                folder_key_16 = folder_key[:16]
+            else:
+                folder_key_16 = folder_key + b'\x00' * (16 - len(folder_key))
+            
+            share_aes = AESCrypto(share_key)
+            encrypted_folder_key = share_aes.encrypt_ecb(folder_key_16)
+            encrypted_folder_key_b64 = encoder.encode(encrypted_folder_key)
+            
+            # Add to crypto request: [share_index, node_index, encrypted_key]
+            # share_index=0 (new share), node_index=0 (first node)
+            crypto_request[2] = [0, 0, encrypted_folder_key_b64]
+        
+        # Call share_folder API
+        await self._api.share_folder(
+            node_id=mega_folder.handle,
+            share_key=share_key,
+            encrypted_share_key=encrypted_share_key_b64,
+            auth_key=auth_key_b64,
+            crypto_request=crypto_request
+        )
+        
+        # Update node's key to share key for link generation
+        original_key = mega_folder.key
+        mega_folder.key = share_key
+        
+        try:
+            # Get link with share key
+            url = await self.link(mega_folder, no_key=False)
+        finally:
+            # Restore original key
+            mega_folder.key = original_key
+        
+        return url
+    
     async def create_folder(
         self,
         name: str,

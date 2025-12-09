@@ -369,6 +369,53 @@ class Node:
             target_folder=self,
             clear_attributes=clear_attributes
         )
+    
+    async def link(self, no_key: bool = False) -> str:
+        """
+        Get public link for this node.
+        
+        Args:
+            no_key: If True, don't include key in URL (for folders with share key)
+            
+        Returns:
+            Public MEGA URL (e.g., "https://mega.nz/file/...")
+            
+        Example:
+            >>> file = root / "document.pdf"
+            >>> url = await file.link()
+            >>> print(url)  # https://mega.nz/file/...#key
+        """
+        if not self._client:
+            raise RuntimeError("No client attached")
+        
+        return await self._client.link(self, no_key=no_key)
+    
+    async def share_folder(self, share_key: Optional[bytes] = None) -> str:
+        """
+        Share a folder and get its public link.
+        
+        For folders, this creates a share key and generates a shareable link.
+        For files, this is equivalent to link().
+        
+        Args:
+            share_key: Optional 16-byte share key. If not provided, a random one is generated.
+            
+        Returns:
+            Public MEGA folder URL (e.g., "https://mega.nz/folder/...#key")
+            
+        Example:
+            >>> folder = root / "Documents"
+            >>> url = await folder.share_folder()
+            >>> print(url)  # https://mega.nz/folder/...#sharekey
+        """
+        if not self._client:
+            raise RuntimeError("No client attached")
+        
+        if not self.is_folder:
+            # For files, just return the regular link
+            return await self.link()
+        
+        return await self._client.share_folder(self, share_key=share_key)
 
 
 # Backward compatibility aliases

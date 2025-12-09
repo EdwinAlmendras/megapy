@@ -523,6 +523,63 @@ class AsyncAPIClient:
         """
         return await self.request({'a': 'm', 'n': handle, 't': target})
     
+    async def get_link(self, node_id: str) -> str:
+        """
+        Get public link for a node.
+        
+        Args:
+            node_id: Node handle
+            
+        Returns:
+            Link ID (to be used in URL construction)
+        """
+        result = await self.request({'a': 'l', 'n': node_id})
+        
+        if isinstance(result, int) and result < 0:
+            raise MegaAPIError(result, f"Failed to get link: {result}")
+        
+        if isinstance(result, str):
+            return result
+        
+        # Response might be wrapped
+        if isinstance(result, dict) and 'id' in result:
+            return result['id']
+        
+        return str(result)
+    
+    async def share_folder(
+        self,
+        node_id: str,
+        share_key: bytes,
+        encrypted_share_key: str,
+        auth_key: str,
+        crypto_request: List[Any]
+    ) -> Dict[str, Any]:
+        """
+        Share a folder with a share key.
+        
+        Args:
+            node_id: Folder node handle
+            share_key: 16-byte share key (raw bytes)
+            encrypted_share_key: Base64-encoded encrypted share key
+            auth_key: Base64-encoded authentication key
+            crypto_request: Crypto request array [shares, nodes, keys]
+            
+        Returns:
+            API response
+        """
+        request_data = {
+            'a': 's2',
+            'n': node_id,
+            's': [{'u': 'EXP', 'r': 0}],  # Share with everyone, read-only
+            'ok': encrypted_share_key,
+            'ha': auth_key,
+            'cr': crypto_request
+        }
+        
+        return await self.request(request_data)
+    
+    
     async def get_media_codecs(self) -> Dict[str, Any]:
         """
         Get media codecs list from MEGA.
