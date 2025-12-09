@@ -59,7 +59,11 @@ def stringhash(string, key):
 
 def generate_hashcash_token(challenge):
     """Generates hashcash token (backward compatibility)."""
-    return _hashcash.generate(challenge)
+    return _hashcash.generate_sync(challenge)
+
+async def generate_hashcash_token_async(challenge):
+    """Generates hashcash token asynchronously."""
+    return await _hashcash.generate(challenge)
 
 def mega_verify(data, signature, public_key):
     """Verifies data signature (backward compatibility)."""

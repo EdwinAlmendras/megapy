@@ -162,7 +162,9 @@ class MegaClient:
         *,
         config: Optional[APIConfig] = None,
         base_path: Optional[Path] = None,
-        auto_reconnect: bool = True
+        auto_reconnect: bool = True,
+        email: Optional[str] = None,
+        password: Optional[str] = None
     ):
         """
         Initialize MEGA client.
@@ -173,6 +175,8 @@ class MegaClient:
             config: Optional API configuration
             base_path: Base path for session files
             auto_reconnect: Whether to auto-reconnect on session resume
+            email: Optional email for login (used with session mode)
+            password: Optional password for login (used with session mode)
         """
         from .core.logging import get_logger
         
@@ -183,8 +187,8 @@ class MegaClient:
         # Determine mode based on arguments
         if session is None:
             # No session provided - use memory session (for registration, etc.)
-            self._email: Optional[str] = None
-            self._password: Optional[str] = None
+            self._email: Optional[str] = email
+            self._password: Optional[str] = password
             self._session: SessionStorage = MemorySession()
             self._session_mode = False
         elif api_id is not None:
@@ -194,15 +198,15 @@ class MegaClient:
             self._session: SessionStorage = MemorySession()
             self._session_mode = False
         elif isinstance(session, str):
-            # Session mode: MegaClient("session_name")
-            self._email: Optional[str] = None
-            self._password: Optional[str] = None
+            # Session mode: MegaClient("session_name", email=..., password=...)
+            self._email: Optional[str] = email
+            self._password: Optional[str] = password
             self._session = SQLiteSession(session, base_path)
             self._session_mode = True
         else:
             # Custom session storage: MegaClient(custom_storage)
-            self._email = None
-            self._password = None
+            self._email = email
+            self._password = password
             self._session = session
             self._session_mode = True
         
@@ -317,8 +321,8 @@ class MegaClient:
             self._email = email
         if password:
             self._password = password
-        
         if not self._email or not self._password:
+            
             self._email, self._password = await self._prompt_credentials()
         
         # Fresh login
@@ -440,7 +444,11 @@ class MegaClient:
     async def __aenter__(self) -> 'MegaClient':
         """Enter async context - connects and logs in."""
         if self._session_mode:
-            await self.start()
+            # If email and password are provided, pass them to start()
+            if self._email and self._password:
+                await self.start(email=self._email, password=self._password)
+            else:
+                await self.start()
         elif self._email and self._password:
             # Direct credentials mode
             self._api = AsyncAPIClient(self._config)

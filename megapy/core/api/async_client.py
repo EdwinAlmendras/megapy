@@ -12,7 +12,7 @@ import aiohttp
 
 from .config import APIConfig
 from .errors import MegaAPIError
-from ..crypto import generate_hashcash_token
+from ..crypto import generate_hashcash_token_async
 
 
 class AsyncAPIClient:
@@ -53,14 +53,7 @@ class AsyncAPIClient:
         self._flush_task: Optional[asyncio.Task] = None
         self._flush_delay = 0.35  # 350ms delay like webclient
         self._max_batch_size = 50  # Maximum requests per batch
-        
-        from ..logging import get_logger
-        self._logger = get_logger('megapy.api')
-        # Only set level if root logger has no handlers (basicConfig not called)
-        # Otherwise, let it inherit from root logger
-        root_logger = logging.getLogger()
-        if not root_logger.handlers:
-            self._logger.setLevel(self._config.log_level)
+        self._logger = logging.getLogger(__name__)
     
     @property
     def session_id(self) -> Optional[str]:
@@ -255,7 +248,8 @@ class AsyncAPIClient:
     async def _request_batch(
         self,
         requests: List[Dict[str, Any]],
-        retry_count: int = 0
+        retry_count: int = 0,
+        hashcash_retries: int = 0
     ) -> List[Any]:
         """
         Execute a batch of requests in a single API call.
@@ -263,12 +257,15 @@ class AsyncAPIClient:
         Args:
             requests: List of request data dicts
             retry_count: Current retry attempt
+            hashcash_retries: Number of hashcash retry attempts (don't increment counter on hashcash retries)
             
         Returns:
             List of response data
         """
         session = await self._ensure_session()
-        self._counter_id += 1
+        # Only increment counter if this is not a hashcash retry
+        if hashcash_retries == 0:
+            self._counter_id += 1
         
         # Extract special fields from first request (if any)
         querystring = requests[0].pop('_querystring', None) if requests else None
@@ -278,27 +275,42 @@ class AsyncAPIClient:
         headers = {}
         
         if hashcash:
-            headers['X-MEGA-hashcash'] = hashcash
+            headers['X-Hashcash'] = hashcash
         
         # Prepare batch request body (array of requests)
         body = json.dumps(requests)
-        
+        self._logger.debug(f"Headers: {headers}")
         self._logger.debug(f"Batch request ({len(requests)} requests) to {url}")
         self._logger.debug(f"Request data: {body}")
         
         try:
+            proxy = self._config.proxy.to_aiohttp_proxy() if self._config.proxy else None
             async with session.post(
                 url,
                 data=body,
                 headers=headers,
-                proxy=self._config.proxy.to_aiohttp_proxy() if self._config.proxy else None
+                proxy=proxy
             ) as response:
-                # Handle hashcash challenge
-                if 'X-Hashcash' in response.headers:
-                    challenge = response.headers['X-Hashcash']
-                    if requests:
-                        requests[0]['_hashcash'] = generate_hashcash_token(challenge)
-                    return await self._request_batch(requests, retry_count)
+                # Handle hashcash challenge (status 402 or X-Hashcash header)
+                if response.status == 402 or 'X-Hashcash' in response.headers:
+                    if hashcash_retries >= 3:
+                        raise MegaAPIError(402, "Hashcash challenge failed after 3 retries")
+                    
+                    challenge = response.headers.get('X-Hashcash', '')
+                    if not challenge:
+                        raise MegaAPIError(402, "Invalid 402 response, missing X-Hashcash header")
+                    
+                    self._logger.debug(f"Hashcash challenge (attempt {hashcash_retries + 1}/3): {challenge}")
+                    
+                    try:
+                        hashcash_solution = await generate_hashcash_token_async(challenge)
+                        if requests:
+                            requests[0]['_hashcash'] = hashcash_solution
+                        # Retry with hashcash solution (increment hashcash retry counter)
+                        return await self._request_batch(requests, retry_count, hashcash_retries + 1)
+                    except Exception as e:
+                        self._logger.error(f"Hashcash generation failed: {e}")
+                        raise MegaAPIError(402, f"Hashcash generation failed: {e}")
                 
                 response_text = await response.text()
                 self._logger.debug(f"Response data: {response_text[:1000] if len(response_text) > 1000 else response_text}")
@@ -331,7 +343,8 @@ class AsyncAPIClient:
     async def _request_immediate(
         self,
         data: Dict[str, Any],
-        retry_count: int = 0
+        retry_count: int = 0,
+        hashcash_retries: int = 0
     ) -> Any:
         """
         Make immediate request without batching (for retries or special cases).
@@ -339,22 +352,25 @@ class AsyncAPIClient:
         Args:
             data: Request data
             retry_count: Current retry attempt
+            hashcash_retries: Number of hashcash retry attempts (don't increment counter on hashcash retries)
             
         Returns:
             API response data
         """
         session = await self._ensure_session()
-        self._counter_id += 1
+        # Only increment counter if this is not a hashcash retry
+        if hashcash_retries == 0:
+            self._counter_id += 1
         
         # Extract special fields
         querystring = data.pop('_querystring', None)
         hashcash = data.pop('_hashcash', None)
-        
+        logging.debug(f"Requesting with hashcash: {hashcash}")
         url = self._build_url(querystring)
         headers = {}
         
         if hashcash:
-            headers['X-MEGA-hashcash'] = hashcash
+            headers['X-Hashcash'] = hashcash
         
         # Prepare request body
         body = json.dumps([data])
@@ -369,11 +385,25 @@ class AsyncAPIClient:
                 headers=headers,
                 proxy=self._config.proxy.to_aiohttp_proxy() if self._config.proxy else None
             ) as response:
-                # Handle hashcash challenge
-                if 'X-Hashcash' in response.headers:
-                    challenge = response.headers['X-Hashcash']
-                    data['_hashcash'] = generate_hashcash_token(challenge)
-                    return await self._request_immediate(data, retry_count)
+                # Handle hashcash challenge (status 402 or X-Hashcash header)
+                if response.status == 402 or 'X-Hashcash' in response.headers:
+                    if hashcash_retries >= 3:
+                        raise MegaAPIError(402, "Hashcash challenge failed after 3 retries")
+                    
+                    challenge = response.headers.get('X-Hashcash', '')
+                    if not challenge:
+                        raise MegaAPIError(402, "Invalid 402 response, missing X-Hashcash header")
+                    
+                    self._logger.debug(f"Hashcash challenge (attempt {hashcash_retries + 1}/3): {challenge}")
+                    
+                    try:
+                        hashcash_solution = await generate_hashcash_token_async(challenge)
+                        data['_hashcash'] = hashcash_solution
+                        # Retry with hashcash solution (increment hashcash retry counter)
+                        return await self._request_immediate(data, retry_count, hashcash_retries + 1)
+                    except Exception as e:
+                        self._logger.error(f"Hashcash generation failed: {e}")
+                        raise MegaAPIError(402, f"Hashcash generation failed: {e}")
                 
                 response_text = await response.text()
                 self._logger.debug(f"Response data: {response_text[:1000] if len(response_text) > 1000 else response_text}")
