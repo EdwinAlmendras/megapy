@@ -1375,57 +1375,98 @@ class MegaClient:
         
         # Generate or use provided share key
         import os
-        if share_key is None:
-            share_key = os.urandom(16)
-        elif len(share_key) != 16:
-            raise ValueError("Share key must be 16 bytes")
         
-        # Encrypt share key with master key using AES-ECB
+        # Check if share already exists in the server
+        # If the folder handle is in share_keys, it means the share was processed
+        # from ok0/ok response, so the share already exists on the server
+        share_exists = False
+        
+        # Check if folder is already shared by checking if it has shares
+        # The folder.shares property returns share handles if the folder is shared
+        existing_shares = folder.shares if hasattr(folder, 'shares') else []
+        
+        # Debug: Check what's in share_keys
+        if self._node_service:
+            logger.debug(f"Checking for existing share. Folder handle: {mega_folder.handle}")
+            logger.debug(f"Available share_keys: {list(self._node_service.share_keys.keys())}")
+            logger.debug(f"Folder shares property: {existing_shares}")
+        
+        # If folder has shares, it means it's already shared
+        # Check if any of those share handles have keys in share_keys
+        # Note: share_keys[handle] can be empty bytes (b'') if it's a placeholder (share exists but no key)
+        if existing_shares and self._node_service:
+            # Find the first share handle that exists in share_keys (even if placeholder)
+            for share_handle in existing_shares:
+                if share_handle in self._node_service.share_keys:
+                    existing_key = self._node_service.share_keys[share_handle]
+                    # If key is empty bytes (b''), it means placeholder (share exists but no key available)
+                    # If key is valid bytes (16 bytes), use it
+                    if existing_key and len(existing_key) == 16:
+                        share_key = existing_key
+                    share_exists = True
+                    is_placeholder = (existing_key == b'' or existing_key is None)
+                    logger.info(f"Share already exists for folder {mega_folder.handle} (found share handle {share_handle} in share_keys, key={'available' if not is_placeholder else 'placeholder'})")
+                    break
+        
+        # Also check if folder handle is directly in share_keys (fallback)
+        if not share_exists and self._node_service and mega_folder.handle in self._node_service.share_keys:
+            # Share already exists - check if we have the key or it's a placeholder
+            existing_key = self._node_service.share_keys[mega_folder.handle]
+            if existing_key and len(existing_key) == 16:
+                share_key = existing_key
+            share_exists = True
+            is_placeholder = (existing_key == b'' or existing_key is None)
+            logger.info(f"Share already exists for folder {mega_folder.handle} (found folder handle directly in share_keys, key={'available' if not is_placeholder else 'placeholder'})")
+        
+        if not share_exists:
+            if share_key is None:
+                # No existing share - generate new share key
+                logger.debug(f"No existing share found for folder {mega_folder.handle}. Generating new share key.")
+                share_key = os.urandom(16)
+            elif len(share_key) != 16:
+                raise ValueError("Share key must be 16 bytes")
+        
+        # When share already exists (processed from ok0/ok), use placeholders for ok and ha
+        # Otherwise, encrypt share key with master key using AES-ECB
         from .core.crypto.aes.aes_crypto import AESCrypto
         from .core.crypto import Base64Encoder
         encoder = Base64Encoder()
         
-        aes = AESCrypto(self._master_key)
-        encrypted_share_key = aes.encrypt_ecb(share_key)
-        encrypted_share_key_b64 = encoder.encode(encrypted_share_key)
-        
-        # Create auth key: handler + handler, encrypted with AES-ECB
-        handler = mega_folder.handle.encode('utf-8')
-        auth_key_data = handler + handler
-        auth_key_encrypted = aes.encrypt_ecb(auth_key_data)
-        auth_key_b64 = encoder.encode(auth_key_encrypted)
-        
-        # Create crypto request
-        # Format: [shares, nodes, keys]
-        # shares: list of share handles (empty for new share, but we need to include the new share)
-        # nodes: list of node handles to share
-        # keys: flat array of [share_index, node_index, encrypted_key, ...]
-        # For a new share, shares is empty, but we encrypt the node key with the new share key
-        crypto_request = [
-            [],  # shares (empty for new share)
-            [mega_folder.handle],  # nodes to share
-            []  # keys (will be populated)
-        ]
-        
-        # Encrypt folder key with share key
-        # For new shares, share_index is 0 (first share)
-        if mega_folder.key:
-            folder_key = mega_folder.key
-            # For 32-byte keys, use first 16 bytes (or XOR first 16 with second 16)
-            if len(folder_key) >= 32:
-                folder_key_16 = bytes(a ^ b for a, b in zip(folder_key[:16], folder_key[16:32]))
-            elif len(folder_key) >= 16:
-                folder_key_16 = folder_key[:16]
-            else:
-                folder_key_16 = folder_key + b'\x00' * (16 - len(folder_key))
+
+        if share_exists:
+            logger.debug(f"Share already exists for folder {mega_folder.handle}. Using placeholders for ok and ha.")
+            # Use placeholders when share already exists (as in mega.js)
+            # This happens when the share was already processed from ok0/ok response
+            encrypted_share_key_b64 = "AAAAAAAAAAAAAAAAAAAAAA"
+            auth_key_b64 = "AAAAAAAAAAAAAAAAAAAAAA"
+            logger.debug(f"Using placeholders for ok and ha (share already exists)")
+        else:
+            # New share - encrypt share key and auth key
+            aes = AESCrypto(self._master_key)
+            encrypted_share_key = aes.encrypt_ecb(share_key)
+            encrypted_share_key_b64 = encoder.encode(encrypted_share_key)
             
-            share_aes = AESCrypto(share_key)
-            encrypted_folder_key = share_aes.encrypt_ecb(folder_key_16)
-            encrypted_folder_key_b64 = encoder.encode(encrypted_folder_key)
-            
-            # Add to crypto request: [share_index, node_index, encrypted_key]
-            # share_index=0 (new share), node_index=0 (first node)
-            crypto_request[2] = [0, 0, encrypted_folder_key_b64]
+            # Create auth key: handler + handler, encrypted with AES-ECB
+            handler = mega_folder.handle.encode('utf-8')
+            auth_key_data = handler + handler
+            auth_key_encrypted = aes.encrypt_ecb(auth_key_data)
+            auth_key_b64 = encoder.encode(auth_key_encrypted)
+            logger.debug(f"Encrypted new share key and auth key")
+        # Create crypto request using Node's get_crypto_request method
+        # First, we need to add the new share key to the NodeService's share_keys
+        # temporarily so it can be used in the crypto request
+        if self._node_service:
+            # Temporarily add the new share key
+            original_share_keys = self._node_service._share_keys.copy()
+            self._node_service._share_keys[mega_folder.handle] = share_key
+        
+        try:
+            # Use Node's built-in method to generate crypto request
+            crypto_request = mega_folder.get_crypto_request(shares=[mega_folder.handle])
+        finally:
+            # Restore original share keys
+            if self._node_service:
+                self._node_service._share_keys = original_share_keys
         
         # Call share_folder API
         await self._api.share_folder(

@@ -4,6 +4,7 @@ from .aes import AESCrypto, EncryptionService, DecryptionService
 from .key_derivation import PasswordKeyDeriverV1, PasswordKeyDeriverV2
 from .hashing import StringHasher, HashcashGenerator
 from .rsa import RSAService, RSAKeyDecoder
+from .crypto_request import make_crypto_request
 
 # Compatibility layer - maintain old function-based API
 _base64 = Base64Encoder()
@@ -109,6 +110,8 @@ __all__ = [
     'HashcashGenerator',
     'RSAService',
     'RSAKeyDecoder',
+    # Crypto request builder
+    'make_crypto_request',
     # Backward compatibility functions
     'mega_encrypt',
     'mega_decrypt',

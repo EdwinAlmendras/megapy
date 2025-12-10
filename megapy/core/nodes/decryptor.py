@@ -4,7 +4,9 @@ from typing import Dict, Any, Optional, Tuple
 from Crypto.Cipher import AES
 from ..crypto import Base64Encoder, unmerge_key_mac, merge_key_mac
 from megapy.core.attributes.packer import AttributesPacker
+import logging
 
+logger = logging.getLogger(__name__)
 
 class KeyDecryptor:
     """
@@ -20,31 +22,98 @@ class KeyDecryptor:
     def decrypt_node_key(
         self,
         node: Dict[str, Any],
-        master_key: bytes
+        master_key: bytes,
+        share_keys: Optional[Dict[str, bytes]] = None
     ) -> Optional[bytes]:
         """
         Decrypt node key from API response.
+        
+        Handles multiple id:key pairs separated by '/' (for shared nodes).
+        Similar to mega.js mutable-file.mjs lines 22-44.
+        
+        The 'k' field can contain:
+        - Single pair: "userId:encryptedKey"
+        - Multiple pairs: "userId1:key1/userId2:key2" (for shared nodes)
+        
+        Priority:
+        1. Try to decrypt with master_key if id matches current user
+        2. Try to decrypt with share_keys if id is in share_keys
+        
+        Args:
+            node: Node data from API response
+            master_key: Master encryption key for current user
+            share_keys: Optional dict mapping share handles to their keys
         
         Returns:
             Full 32-byte key for files (needed for media attributes)
             16-byte key for folders
         """
         key_str = node.get('k', '')
-        if not key_str or ':' not in key_str:
+        if not key_str:
             return None
         
-        try:
-            _, encrypted_b64 = key_str.split(':', 1)
-            encrypted = self._encoder.decode(encrypted_b64)
+        share_keys = share_keys or {}
+        user_id = node.get('u')  # Current user ID
+        
+        # Handle multiple id:key pairs separated by '/'
+        if '/' in key_str:
+            id_key_pairs = key_str.split('/')
             
-            cipher = AES.new(master_key, AES.MODE_ECB)
-            decrypted = cipher.decrypt(encrypted)
+            for id_key_pair in id_key_pairs:
+                if ':' not in id_key_pair:
+                    continue
+                
+                id_part, encrypted_b64 = id_key_pair.split(':', 1)
+                
+                # First, try if it's the current user's key
+                if id_part == user_id:
+                    try:
+                        encrypted = self._encoder.decode(encrypted_b64)
+                        cipher = AES.new(master_key, AES.MODE_ECB)
+                        decrypted = cipher.decrypt(encrypted)
+                        logger.info(f"Decrypted from user key {self._encoder.encode(decrypted)}")
+                        return decrypted
+                    except Exception:
+                        continue
+                
+                # Then, try if there's a shareKey for this id
+                if id_part in share_keys:
+                    try:
+                        share_key = share_keys[id_part]
+                        encrypted = self._encoder.decode(encrypted_b64)
+                        cipher = AES.new(share_key, AES.MODE_ECB)
+                        decrypted = cipher.decrypt(encrypted)
+                        logger.info(f"Decrypted from shared key", self._encoder.encode(decrypted))
+                        return decrypted
+                    except Exception:
+                        continue
+        else:
+            # Single id:key pair (original behavior)
+            if ':' not in key_str:
+                return None
             
-            # Return full key (32 bytes for files, 16 for folders)
-            return decrypted
+            try:
+                id_part, encrypted_b64 = key_str.split(':', 1)
+                encrypted = self._encoder.decode(encrypted_b64)
+                
+                # Try master key first (if id matches user)
+                if id_part == user_id:
+                    cipher = AES.new(master_key, AES.MODE_ECB)
+                    decrypted = cipher.decrypt(encrypted)
+                    return decrypted
+                
+                # Try share key
+                if id_part in share_keys:
+                    share_key = share_keys[id_part]
+                    cipher = AES.new(share_key, AES.MODE_ECB)
+                    decrypted = cipher.decrypt(encrypted)
+                    return decrypted
+                    
+            except Exception:
+                pass
+        
+        return None
             
-        except Exception:
-            return None
     
     def get_file_key(self, full_key: bytes) -> bytes:
         """
@@ -80,8 +149,9 @@ class KeyDecryptor:
                     end += 1
                 json_str = decrypted[4:end].decode('utf-8', errors='ignore')
                 return json.loads(json_str)
-            
         except Exception:
             pass
         
         return {'n': node.get('h', 'Unknown')}
+        
+

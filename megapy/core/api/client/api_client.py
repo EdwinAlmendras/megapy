@@ -1,12 +1,13 @@
 """MEGA API client using composition."""
 import random
 import logging
-from typing import Dict, Optional, Callable, Any
+from typing import Dict, Optional, Callable, Any, List, Union
 from ..events import EventEmitter
 from ..session import SessionManager
 from ..request import RequestHandler, RequestBuilder
 from ..notifications import NotificationPuller
 from megapy.core.logging import get_logger
+from ...crypto import make_crypto_request
 
 
 class APIClient(EventEmitter):
@@ -110,6 +111,35 @@ class APIClient(EventEmitter):
     def rename(self, handle: str, attrs: Dict):
         """Renames node."""
         return self.request({'a': 'a', 'n': handle, 'attr': attrs})
+    
+    def make_crypto_request(
+        self,
+        share_keys: Dict[str, bytes],
+        sources: Union[List[Dict[str, Any]], Dict[str, Any]],
+        shares: Optional[List[str]] = None
+    ) -> List[Any]:
+        """
+        Create a crypto request array for sharing files/folders.
+        
+        This is a convenience method that wraps the make_crypto_request function.
+        It creates the crypto request array format used in MEGA API calls.
+        
+        Args:
+            share_keys: Dictionary mapping share handles to their encryption keys
+            sources: List of source nodes (dicts with 'nodeId'/'handle' and 'key') 
+                     or a single node dict
+            shares: Optional list of share handles. If not provided, will be 
+                    automatically determined from share_keys
+        
+        Returns:
+            Crypto request array: [shares, nodes, keys]
+            
+        Example:
+            >>> share_keys = {'share_handle': b'16-byte-share-key'}
+            >>> sources = [{'nodeId': 'node1', 'key': b'32-byte-file-key'}]
+            >>> cr = api_client.make_crypto_request(share_keys, sources)
+        """
+        return make_crypto_request(share_keys, sources, shares)
     
     def close(self):
         """Closes API connection (synchronous for compatibility)."""

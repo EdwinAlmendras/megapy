@@ -99,6 +99,51 @@ class Node:
     def folders(self) -> List[Node]:
         return [c for c in self.children if c.is_folder]
     
+    @property
+    def self_and_children(self) -> List[Node]:
+        """
+        Get this node and all its children recursively.
+        
+        Returns:
+            List of nodes including self and all descendants
+        """
+        result = [self]
+        for child in self.children:
+            result.extend(child.self_and_children)
+        return result
+    
+    @property
+    def shares(self) -> List[str]:
+        """
+        Get all share handles for this node and its parents.
+        
+        Returns:
+            List of share handles (handles that have share keys)
+        """
+        if not self._client or not hasattr(self._client, '_node_service'):
+            return []
+        
+        node_service = self._client._node_service
+        if not node_service:
+            return []
+        
+        share_keys = node_service.share_keys
+        shares = []
+        
+        # Check if this node has a share key
+        if self.handle in share_keys:
+            shares.append(self.handle)
+        
+        # Recursively check parents
+        parent = self.parent
+        while parent:
+            if parent.handle in share_keys:
+                if parent.handle not in shares:
+                    shares.append(parent.handle)
+            parent = parent.parent
+        
+        return shares
+    
     # =========================================================================
     # Media Properties
     # =========================================================================
@@ -416,7 +461,62 @@ class Node:
             return await self.link()
         
         return await self._client.share_folder(self, share_key=share_key)
-
+    
+    def get_nodes_children_ids(self) -> List[str]:
+        """Get list of node handles including self and all children."""
+        nodes = []
+        
+        def recursive_get_nodes_children_ids(node: Node):
+            nodes.append(node.handle)
+            for child in node.children:
+                recursive_get_nodes_children_ids(child)
+        recursive_get_nodes_children_ids(self)
+        return nodes
+    
+    def get_crypto_request(self, shares: Optional[List[str]] = None) -> List[Any]:
+        """
+        Generate crypto request array for this node and its children.
+        
+        This method creates a crypto request array that can be used in MEGA API calls
+        to share files and folders. It automatically uses the node's share keys
+        from the NodeService.
+        
+        Args:
+            shares: Optional list of share handles. If not provided, will use
+                    the node's shares property (shares from node and parents)
+        
+        Returns:
+            Crypto request array: [shares, nodes, keys]
+            
+        Example:
+            >>> folder = mega.get_node("folder_handle")
+            >>> crypto_request = folder.get_crypto_request()
+            >>> # Use in API call
+            >>> await api.share_folder(..., crypto_request=crypto_request)
+        """
+        from .core.crypto import make_crypto_request
+        
+        # Get share keys from NodeService
+        if not self._client or not hasattr(self._client, '_node_service'):
+            raise RuntimeError("Node must be associated with a client to generate crypto request")
+        
+        node_service = self._client._node_service
+        if not node_service:
+            raise RuntimeError("NodeService not available. Load nodes first.")
+        
+        share_keys = node_service.share_keys
+        
+        # Use provided shares or get from node
+        if shares is None:
+            shares = self.shares
+        
+        # Generate crypto request directly with this Node
+        return make_crypto_request(
+            share_keys=share_keys,
+            sources=self,  # Pass the Node directly
+            shares=shares
+        )
+        
 
 # Backward compatibility aliases
 MegaFile = Node

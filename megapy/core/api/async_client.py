@@ -7,12 +7,12 @@ import json
 import random
 import logging
 import asyncio
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Union
 import aiohttp
 
 from .config import APIConfig
 from .errors import MegaAPIError
-from ..crypto import generate_hashcash_token
+from ..crypto import generate_hashcash_token, make_crypto_request
 
 
 class AsyncAPIClient:
@@ -571,14 +571,42 @@ class AsyncAPIClient:
         request_data = {
             'a': 's2',
             'n': node_id,
-            's': [{'u': 'EXP', 'r': 0}],  # Share with everyone, read-only
             'ok': encrypted_share_key,
             'ha': auth_key,
-            'cr': crypto_request
+            'cr': crypto_request,
+            's': [{ "u": "EXP", "r": 0 }]
         }
         
         return await self.request(request_data)
     
+    def make_crypto_request(
+        self,
+        share_keys: Dict[str, bytes],
+        sources: Union[List[Dict[str, Any]], Dict[str, Any]],
+        shares: Optional[List[str]] = None
+    ) -> List[Any]:
+        """
+        Create a crypto request array for sharing files/folders.
+        
+        This is a convenience method that wraps the make_crypto_request function.
+        It creates the crypto request array format used in MEGA API calls.
+        
+        Args:
+            share_keys: Dictionary mapping share handles to their encryption keys
+            sources: List of source nodes (dicts with 'nodeId'/'handle' and 'key') 
+                     or a single node dict
+            shares: Optional list of share handles. If not provided, will be 
+                    automatically determined from share_keys
+        
+        Returns:
+            Crypto request array: [shares, nodes, keys]
+            
+        Example:
+            >>> share_keys = {'share_handle': b'16-byte-share-key'}
+            >>> sources = [{'nodeId': 'node1', 'key': b'32-byte-file-key'}]
+            >>> cr = await api_client.make_crypto_request(share_keys, sources)
+        """
+        return make_crypto_request(share_keys, sources, shares)
     
     async def get_media_codecs(self) -> Dict[str, Any]:
         """
