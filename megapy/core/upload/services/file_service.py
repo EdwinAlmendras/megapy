@@ -141,8 +141,6 @@ class AsyncFileReader:
                     await f.seek(start)
                     data = await f.read(chunk_size)
             
-            if data:
-                self._logger.debug(f"Read chunk: {start}-{end} ({len(data)} bytes)")
             return data if data else None
         except (IOError, OSError) as e:
             self._logger.error(f"Failed to read chunk {start}-{end}: {e}")
