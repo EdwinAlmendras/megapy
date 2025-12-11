@@ -54,7 +54,8 @@ class KeyDecryptor:
         
         share_keys = share_keys or {}
         user_id = node.get('u')  # Current user ID
-        
+        user_key = None
+        share_key = None
         # Handle multiple id:key pairs separated by '/'
         if '/' in key_str:
             id_key_pairs = key_str.split('/')
@@ -64,55 +65,51 @@ class KeyDecryptor:
                     continue
                 
                 id_part, encrypted_b64 = id_key_pair.split(':', 1)
-                
                 # First, try if it's the current user's key
                 if id_part == user_id:
-                    try:
-                        encrypted = self._encoder.decode(encrypted_b64)
-                        cipher = AES.new(master_key, AES.MODE_ECB)
-                        decrypted = cipher.decrypt(encrypted)
-                        logger.info(f"Decrypted from user key {self._encoder.encode(decrypted)}")
-                        return decrypted
-                    except Exception:
-                        continue
-                
+                    encrypted = self._encoder.decode(encrypted_b64)
+                    cipher = AES.new(master_key, AES.MODE_ECB)
+                    decrypted = cipher.decrypt(encrypted)
+                    logger.info(f"Decrypted from user key {self._encoder.encode(decrypted)}")
+                    user_key = decrypted
                 # Then, try if there's a shareKey for this id
-                if id_part in share_keys:
-                    try:
-                        share_key = share_keys[id_part]
-                        encrypted = self._encoder.decode(encrypted_b64)
-                        cipher = AES.new(share_key, AES.MODE_ECB)
-                        decrypted = cipher.decrypt(encrypted)
-                        logger.info(f"Decrypted from shared key", self._encoder.encode(decrypted))
-                        return decrypted
-                    except Exception:
-                        continue
+
+                share_id = id_part
+                encrypted = self._encoder.decode(encrypted_b64)
+                cipher = AES.new(master_key, AES.MODE_ECB)
+                decrypted = cipher.decrypt(encrypted)
+                logger.info(f"Decrypted from shared key : {self._encoder.encode(decrypted)}")
+                share_key = decrypted
+                return user_key, share_key
         else:
             # Single id:key pair (original behavior)
             if ':' not in key_str:
-                return None
+                return None, None
             
             try:
                 id_part, encrypted_b64 = key_str.split(':', 1)
                 encrypted = self._encoder.decode(encrypted_b64)
                 
+                user_key = None
                 # Try master key first (if id matches user)
                 if id_part == user_id:
                     cipher = AES.new(master_key, AES.MODE_ECB)
                     decrypted = cipher.decrypt(encrypted)
-                    return decrypted
+                    user_key = decrypted
                 
+                share_key = None
                 # Try share key
                 if id_part in share_keys:
                     share_key = share_keys[id_part]
                     cipher = AES.new(share_key, AES.MODE_ECB)
                     decrypted = cipher.decrypt(encrypted)
-                    return decrypted
+                    share_key = decrypted
+                return user_key, share_key
                     
             except Exception:
                 pass
         
-        return None
+        return None, None
             
     
     def get_file_key(self, full_key: bytes) -> bytes:

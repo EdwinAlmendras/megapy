@@ -125,7 +125,7 @@ class FileAttributes:
             label=data.get('lbl', 0),
             favorite=bool(data.get('fav', 0)),
             mega_id=data.get('m'),
-            **extra
+            #**extra
         )
     
     @classmethod

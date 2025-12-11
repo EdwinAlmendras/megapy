@@ -28,6 +28,8 @@ class Node:
     is_folder: bool = False
     parent_handle: Optional[str] = None
     key: Optional[bytes] = None
+    share_key: Optional[bytes] = None
+    share_id: Optional[str] = None  # Public handle (ph) for shared files/folders
     fa: Optional[str] = None
     attributes: Optional[FileAttributes] = None
     parent: Optional[Node] = field(default=None, repr=False)
@@ -461,6 +463,68 @@ class Node:
             return await self.link()
         
         return await self._client.share_folder(self, share_key=share_key)
+    
+    def get_share_url(self) -> Optional[str]:
+        """
+        Get the share URL for this node if it's already shared.
+        
+        Similar to storage.mjs lines 177-181. Returns the share URL if the node
+        has a share_id (ph), otherwise returns None.
+        
+        For folders: uses share_key from NodeService.share_keys or node.share_key
+        For files: uses node.key
+        
+        Returns:
+            Share URL (e.g., "https://mega.nz/folder/...#key") or None if not shared
+            
+        Example:
+            >>> folder = root / "SharedFolder"
+            >>> if folder.share_id:
+            ...     url = folder.get_share_url()
+            ...     print(url)  # https://mega.nz/folder/...#key
+        """
+        if not self.share_id:
+            return None
+        
+        from .core.crypto import Base64Encoder
+        
+        # Determine the key to use
+        # For folders: use share_key from service or node.share_key
+        # For files: use node.key
+        key = None
+        if self.is_folder:
+            # Try to get share_key from NodeService first
+            if self._client and self._client._node_service:
+                share_keys = self._client._node_service.share_keys
+                if self.handle in share_keys:
+                    key = share_keys[self.handle]
+                    # Skip placeholder keys (empty bytes)
+                    if not key or len(key) == 0:
+                        key = None
+            
+            # Fallback to node.share_key
+            if not key and self.share_key:
+                key = self.share_key
+        else:
+            # For files, use the node key
+            key = self.key
+        
+        # Build URL
+        node_type = "folder" if self.is_folder else "file"
+        url = f"https://mega.nz/{node_type}/{self.share_id}"
+        
+        # Add key to URL if available
+        if key:
+            encoder = Base64Encoder()
+            key_str = encoder.encode(key)
+            url += f"#{key_str}"
+        
+        return url
+    
+    @property
+    def is_shared(self) -> bool:
+        """Check if this node is shared (has a share_id)."""
+        return self.share_id is not None
     
     def get_nodes_children_ids(self) -> List[str]:
         """Get list of node handles including self and all children."""

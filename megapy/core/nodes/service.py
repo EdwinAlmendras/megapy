@@ -75,11 +75,25 @@ class NodeService:
         logger.debug("Processing share keys with _process_share_keys()")
         self._process_share_keys(api_response)
 
+        # Process share IDs (ph) from response.ph (like storage.mjs line 173-182)
+        share_ids_map = {}  # Map node handle -> share_id (ph)
+        ph_list = api_response.get('ph', [])
+        if ph_list:
+            logger.debug(f"Processing {len(ph_list)} share IDs (ph)")
+            for ph_item in ph_list:
+                node_handle = ph_item.get('h')
+                share_id = ph_item.get('ph')
+                if node_handle and share_id:
+                    share_ids_map[node_handle] = share_id
+
         # First pass: create all nodes
         logger.debug("First pass: creating all nodes")
         for idx, data in enumerate(nodes_data, 1):
             node = self._create_node(data)
             if node:
+                # Set share_id if this node is shared
+                if node.handle in share_ids_map:
+                    node.share_id = share_ids_map[node.handle]
                 self._nodes[node.handle] = node
 
         # Second pass: build parent/child relationships
@@ -125,41 +139,14 @@ class NodeService:
         # If ok0 exists, it means we're in streaming mode and ok elements come separately
         # If only ok exists, it's legacy cached format
         ok_list = []
-        has_ok0 = bool(api_response.get('ok0'))
         has_ok = bool(api_response.get('ok'))
         
-        if has_ok0:
-            # ok0 is a dict where keys are handlers and values are share data
-            # Convert to list format for consistent processing
-            # When ok0 exists, we're in streaming mode - preserve existing share keys
-            logger.debug("Processing ok0 (streaming mode)")
-            ok0_dict = api_response.get('ok0')
-            if isinstance(ok0_dict, dict):
-                ok_list = [{'h': handler, **data} for handler, data in ok0_dict.items()]
-            else:
-                ok_list = ok0_dict if isinstance(ok0_dict, list) else []
-            # Don't reset share_keys for ok0 - preserve existing ones (streaming mode)
-            if not self._share_keys:
-                self._share_keys = {}
-            logger.debug(f"Processing ok0 (streaming mode) - preserving existing {len(self._share_keys)} share keys")
-        elif has_ok:
-            # Legacy format - process all at once
-            # When only ok exists (no ok0), reset share keys (legacy cached format)
+        if has_ok:
             ok_list = api_response.get('ok')
             if not isinstance(ok_list, list):
                 ok_list = []
             self._share_keys = {}
-            logger.debug("Processing ok (legacy format) - resetting share keys")
-        else:
-            # No ok or ok0 - only reset if we don't have any share keys yet
-            if not self._share_keys:
-                self._share_keys = {}
-            logger.debug("No 'ok' or 'ok0' key found in api_response. Preserving existing share keys.")
-            return
-        
-        if not ok_list:
-            logger.debug("No share keys to process (empty 'ok' or 'ok0' data).")
-            return
+
         
         for idx, share in enumerate(ok_list, 1):
             handler = share.get('h')
@@ -234,48 +221,49 @@ class NodeService:
     
     def _create_node(self, data: Dict[str, Any]) -> Optional[Node]:
         """Create a single node from API data."""
-        try:
-            handle = data.get('h', '')
-            node_type = data.get('t', 0)
-            
-            # Skip inbox and trash
-            if node_type in (self.NODE_TYPE_INBOX, self.NODE_TYPE_TRASH):
-                return None
-            
-            # Decrypt key (full 32 bytes for files)
-            # Pass share_keys to handle shared nodes with multiple id:key pairs
-            key = self._decryptor.decrypt_node_key(data, self._master_key, self._share_keys)
-            
-            # Decrypt attributes
-            attrs = self._decryptor.decrypt_attributes(data, key)
-            
-            name = attrs.get('n', handle)
-            
-            # Handle root folder
-            if node_type == self.NODE_TYPE_ROOT:
-                name = "Cloud Drive"
-                self._root_handle = handle
-            
-            node = Node(
-                handle=handle,
-                name=name,
-                size=data.get('s', 0),
-                is_folder=(node_type in (self.NODE_TYPE_FOLDER, self.NODE_TYPE_ROOT)),
-                parent_handle=data.get('p'),
-                key=key,
-                fa=data.get('fa'),
-                attributes=FileAttributes.from_dict(attrs),
-                _client=self._client,
-                _raw=data
-            )
-
-            
-            if node_type == self.NODE_TYPE_ROOT:
-                self._root = node
-            
-            return node
-        except Exception:
+        handle = data.get('h', '')
+        node_type = data.get('t', 0)
+        
+        # Skip inbox and trash
+        if node_type in (self.NODE_TYPE_INBOX, self.NODE_TYPE_TRASH):
             return None
+        
+        # Decrypt key (full 32 bytes for files)
+        # Pass share_keys to handle shared nodes with multiple id:key pairs
+        try:
+            key, share_key = self._decryptor.decrypt_node_key(data, self._master_key, self._share_keys)
+        except Exception as e:
+            key, share_key = None, None
+        
+        # Decrypt attributes
+        attrs = self._decryptor.decrypt_attributes(data, key)
+        
+        name = attrs.get('n', handle)
+        
+        # Handle root folder
+        if node_type == self.NODE_TYPE_ROOT:
+            name = "Cloud Drive"
+            self._root_handle = handle
+        
+        node = Node(
+            handle=handle,
+            name=name,
+            size=data.get('s', 0),
+            is_folder=(node_type in (self.NODE_TYPE_FOLDER, self.NODE_TYPE_ROOT)),
+            parent_handle=data.get('p'),
+            key=key,
+            fa=data.get('fa'),
+            attributes=FileAttributes.from_dict(attrs),
+            share_key=share_key,
+            _client=self._client,
+            _raw=data
+        )
+
+        
+        if node_type == self.NODE_TYPE_ROOT:
+            self._root = node
+        
+        return node
     
     def get(self, handle: str) -> Optional[Node]:
         """Get node by handle."""
@@ -329,3 +317,85 @@ class NodeService:
                 node.parent = parent_node
                 if node not in parent_node.children:
                     parent_node.children.append(node)
+    
+    def process_action_packet(self, action: Dict[str, Any]) -> None:
+        """
+        Process an action packet from server notifications (sc events).
+        
+        This handles share key updates that come via action packets when they
+        weren't available in the initial request.
+        
+        Based on webclient mega.js lines 870-910.
+        
+        Args:
+            action: Action packet dict with keys like 'a', 'n', 'ok', 'ha', 'k', etc.
+        """
+        from ..crypto import AESCrypto, Base64Encoder
+        
+        action_type = action.get('a')
+        node_handle = action.get('n')
+        
+        # Process share-related action packets
+        if action_type in ('s', 's2') and node_handle:
+            # Check if this action packet contains a share key
+            share_ok = action.get('ok')  # Encrypted share key
+            share_ha = action.get('ha')  # Authentication hash
+            
+            if share_ok and share_ha:
+                # Verify authenticity and decrypt share key
+                encoder = Base64Encoder()
+                aes = AESCrypto(self._master_key)
+                
+                # Check for placeholders
+                if share_ha == "AAAAAAAAAAAAAAAAAAAAAA" or share_ok == "AAAAAAAAAAAAAAAAAAAAAA":
+                    logger.debug(f"Action packet for {node_handle} has placeholder data, skipping")
+                    return
+                
+                # Verify authenticity (like crypto_handleauthcheck)
+                handler_bytes = node_handle.encode('utf-8')
+                auth = aes.encrypt_ecb(handler_bytes + handler_bytes)
+                
+                share_ha_bytes = encoder.decode(share_ha) if isinstance(share_ha, str) else share_ha
+                
+                if self._constant_time_compare(share_ha_bytes, auth):
+                    # Decrypt and store share key
+                    share_ok_bytes = encoder.decode(share_ok) if isinstance(share_ok, str) else share_ok
+                    decrypted_key = aes.decrypt_ecb(share_ok_bytes)
+                    self._share_keys[node_handle] = decrypted_key
+                    logger.info(f"Updated share key for {node_handle} from action packet")
+                else:
+                    logger.warning(f"Action packet auth check failed for {node_handle}")
+            
+            # Also check if 'k' field contains share key (processed format)
+            elif action.get('k') and isinstance(action['k'], list):
+                # Already processed share key (from worker)
+                self._share_keys[node_handle] = bytes(action['k'])
+                logger.info(f"Updated share key for {node_handle} from processed action packet")
+        
+        # Process ok0 elements that come in action packets
+        elif action_type == 'ok0' or (not action_type and 'h' in action and 'ha' in action):
+            # This might be an ok0 element
+            handler = action.get('h')
+            share_ha = action.get('ha')
+            share_k = action.get('k')
+            
+            if handler and share_ha and share_k:
+                encoder = Base64Encoder()
+                aes = AESCrypto(self._master_key)
+                
+                # Check for placeholders
+                if share_ha == "AAAAAAAAAAAAAAAAAAAAAA" or share_k == "AAAAAAAAAAAAAAAAAAAAAA":
+                    logger.debug(f"ok0 element for {handler} has placeholder data, skipping")
+                    return
+                
+                # Verify authenticity
+                handler_bytes = handler.encode('utf-8')
+                auth = aes.encrypt_ecb(handler_bytes + handler_bytes)
+                
+                share_ha_bytes = encoder.decode(share_ha) if isinstance(share_ha, str) else share_ha
+                
+                if self._constant_time_compare(share_ha_bytes, auth):
+                    share_k_bytes = encoder.decode(share_k) if isinstance(share_k, str) else share_k
+                    decrypted_key = aes.decrypt_ecb(share_k_bytes)
+                    self._share_keys[handler] = decrypted_key
+                    logger.info(f"Updated share key for {handler} from ok0 action packet")

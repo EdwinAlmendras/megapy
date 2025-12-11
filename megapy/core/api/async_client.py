@@ -7,11 +7,12 @@ import json
 import random
 import logging
 import asyncio
-from typing import Dict, Optional, Any, List, Union
+from typing import Dict, Optional, Any, List, Union, Callable
 import aiohttp
 
 from .config import APIConfig
 from .errors import MegaAPIError
+from .events import EventEmitter
 from ..crypto import generate_hashcash_token, make_crypto_request
 
 
@@ -47,6 +48,9 @@ class AsyncAPIClient:
         self._session_id: Optional[str] = None
         self._closed = False
         
+        # Event emitter for action packets and notifications
+        self._event_emitter = EventEmitter('megapy.api')
+        
         # Request batching (like webclient)
         self._request_queue: List[Dict[str, Any]] = []
         self._queue_futures: List[asyncio.Future] = []
@@ -61,6 +65,20 @@ class AsyncAPIClient:
         root_logger = logging.getLogger()
         if not root_logger.handlers:
             self._logger.setLevel(self._config.log_level)
+    
+    def on(self, event: str, callback: Callable) -> 'AsyncAPIClient':
+        """Register an event handler (for action packets, etc.)."""
+        self._event_emitter.on(event, callback)
+        return self
+    
+    def off(self, event: str, callback: Optional[Callable] = None) -> 'AsyncAPIClient':
+        """Remove an event handler."""
+        self._event_emitter.off(event, callback)
+        return self
+    
+    def emit(self, event: str, *args, **kwargs):
+        """Emit an event."""
+        self._event_emitter.emit(event, *args, **kwargs)
     
     @property
     def session_id(self) -> Optional[str]:
@@ -284,7 +302,7 @@ class AsyncAPIClient:
         body = json.dumps(requests)
         
         self._logger.debug(f"Batch request ({len(requests)} requests) to {url}")
-        self._logger.debug(f"Request data: {body}")
+        self._logger.debug(f"Request data: {body[:300] if len(body) > 300 else body}")
         
         try:
             async with session.post(

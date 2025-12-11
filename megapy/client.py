@@ -24,6 +24,7 @@ from .core.api import (
     TimeoutConfig,
     RetryConfig
 )
+from .core.api.notifications import NotificationPuller
 from .core.upload import UploadCoordinator, UploadConfig, UploadResult, UploadProgress
 from .core.upload.models import FileAttributes
 from .core.crypto import Base64Encoder, AESCrypto
@@ -215,6 +216,7 @@ class MegaClient:
         self._master_key: Optional[bytes] = None
         self._node_service: Optional[NodeService] = None
         self._current_node: Optional[Node] = None
+        self._notification_puller: Optional[NotificationPuller] = None
         
         # Registration state (for multi-step registration)
         self._registration_master_key: Optional[bytes] = None
@@ -460,7 +462,14 @@ class MegaClient:
     
     async def close(self):
         """Close the client and release resources."""
+        # Stop notification puller
+        if self._notification_puller:
+            self._notification_puller.close()
+            self._notification_puller = None
+        
+        # Remove action packet handler
         if self._api:
+            self._api.off('sc', self._handle_action_packets)
             await self._api.close()
             self._api = None
         
@@ -613,7 +622,6 @@ class MegaClient:
         
         if refresh or self._node_service is None:
             await self._load_nodes()
-        
         return self._node_service.root
     
     async def get_root(self, refresh: bool = False) -> Node:
@@ -1332,7 +1340,7 @@ class MegaClient:
             url = f"https://mega.nz/file/{link_id}"
         
         # Add key to URL if not no_key and key exists
-        if not no_key and mega_file.key:
+        if not no_key and mega_file.key :
             key_str = encoder.encode(mega_file.key)
             url += f"#{key_str}"
         
@@ -1409,15 +1417,22 @@ class MegaClient:
                     break
         
         # Also check if folder handle is directly in share_keys (fallback)
-        if not share_exists and self._node_service and mega_folder.handle in self._node_service.share_keys:
+        if not share_exists and self._node_service and mega_folder.handle in self._node_service.share_keys and mega_folder.share_key:
             # Share already exists - check if we have the key or it's a placeholder
-            existing_key = self._node_service.share_keys[mega_folder.handle]
-            if existing_key and len(existing_key) == 16:
-                share_key = existing_key
-            share_exists = True
-            is_placeholder = (existing_key == b'' or existing_key is None)
-            logger.info(f"Share already exists for folder {mega_folder.handle} (found folder handle directly in share_keys, key={'available' if not is_placeholder else 'placeholder'})")
-        
+            if mega_folder.share_key:
+                share_key = mega_folder.share_key
+                share_exists = True
+                is_placeholder = (existing_key == b'' or existing_key is None)
+                logger.info(f"Share already exists for folder {mega_folder.handle} (found folder handle directly in share_keys, key={'available' if not is_placeholder else 'placeholder'})")
+                return
+            else:
+                existing_key = self._node_service.share_keys[mega_folder.handle]
+                if existing_key and len(existing_key) == 16:
+                    share_key = existing_key
+                share_exists = True
+                is_placeholder = (existing_key == b'' or existing_key is None)
+                logger.info(f"Share already exists for folder {mega_folder.handle} (found folder handle directly in share_keys, key={'available' if not is_placeholder else 'placeholder'})")
+            
         if not share_exists:
             if share_key is None:
                 # No existing share - generate new share key
@@ -1476,17 +1491,18 @@ class MegaClient:
             auth_key=auth_key_b64,
             crypto_request=crypto_request
         )
-        
-        # Update node's key to share key for link generation
-        original_key = mega_folder.key
-        mega_folder.key = share_key
+        original_key = None
+        if not share_exists:
+            original_key = mega_folder.key
+            mega_folder.key = share_key
         
         try:
             # Get link with share key
             url = await self.link(mega_folder, no_key=False)
         finally:
             # Restore original key
-            mega_folder.key = original_key
+            if original_key:    
+                mega_folder.key = original_key
         
         return url
     
@@ -1882,6 +1898,65 @@ class MegaClient:
         response = await self._api.get_files()
         self._node_service = NodeService(self._master_key, self)
         self._node_service.load(response)
+        
+        # Start notification puller if we have a sequence number (sn)
+        # This enables receiving action packets with share keys
+        if response.get('sn') and not self._notification_puller:
+            await self._start_notification_puller(response['sn'])
+    
+    async def _start_notification_puller(self, sn: str) -> None:
+        """
+        Start the notification puller to receive action packets.
+        
+        Action packets can contain share keys that weren't available
+        in the initial request.
+        
+        Args:
+            sn: Sequence number from get_files response
+        """
+        from .core.api.session import SessionManager
+        
+        # Get gateway URL from config
+        gateway = self._config.gateway
+        
+        # Create session manager for notification puller (reuse same config)
+        session_manager = SessionManager(self._config.user_agent)
+        
+        # Create notification puller
+        self._notification_puller = NotificationPuller(
+            gateway=gateway,
+            session_id=self._api.session_id,
+            session_manager=session_manager,
+            event_emitter=self._api._event_emitter
+        )
+        
+        # Register handler for 'sc' events (action packets)
+        self._api.on('sc', self._handle_action_packets)
+        
+        # Start pulling notifications
+        self._notification_puller.start(sn)
+        self._logger.debug(f"Started notification puller with sn={sn}")
+    
+    def _handle_action_packets(self, actions: List[Dict[str, Any]]) -> None:
+        """
+        Handle action packets from server notifications.
+        
+        Processes share key updates that come via action packets.
+        
+        Args:
+            actions: List of action packet dictionaries
+        """
+        logger.info(f"Handling action packets: {actions}")
+        if not self._node_service:
+            return
+        
+        for action in actions:
+            logger.info(f"Processing action packet: {action}")
+            try:
+                # Process action packet to update share keys
+                self._node_service.process_action_packet(action)
+            except Exception as e:
+                self._logger.warning(f"Error processing action packet: {e}", exc_info=True)
     
     async def _resolve_file(self, file: Union[str, Node]) -> Optional[Node]:
         """Resolve file argument to Node."""

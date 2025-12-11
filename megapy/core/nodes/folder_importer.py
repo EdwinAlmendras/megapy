@@ -248,7 +248,6 @@ class FolderImporter:
                 # Keep original parent relationship for subfolders
                 # The API will handle remapping to new handles
                 node_data['p'] = node.parent.handle if node.parent else None
-            print(node_data)
             prepared.append(node_data)
         
         # Note: Parent relationships will be remapped by the API
