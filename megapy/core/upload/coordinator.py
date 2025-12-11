@@ -184,20 +184,17 @@ class UploadCoordinator:
                 img = Image.open(io.BytesIO(config.preview))
                 width, height = img.size
                 max_dimension = max(width, height)
-                
-                if max_dimension < 1024:
-                    logger.info(f"Skipping preview upload: largest side is {max_dimension}px (less than 1024px)")
-                else:
-                    logger.info(f"Uploading preview ({preview_size_kb:.1f} KB, {width}x{height}px)")
-                    try:
-                        preview_hash = await self._upload_file_attribute(config.preview, original_key[:16], 1)
-                        if preview_hash:
-                            file_attributes.append(f"1*{preview_hash}")
-                            logger.info("Preview uploaded successfully")
-                        else:
-                            logger.warning("Failed to upload preview: no hash returned")
-                    except Exception as e:
-                        logger.warning(f"Failed to upload preview: {e}")
+
+                logger.info(f"Uploading preview ({preview_size_kb:.1f} KB, {width}x{height}px)")
+                try:
+                    preview_hash = await self._upload_file_attribute(config.preview, original_key[:16], 1)
+                    if preview_hash:
+                        file_attributes.append(f"1*{preview_hash}")
+                        logger.info("Preview uploaded successfully")
+                    else:
+                        logger.warning("Failed to upload preview: no hash returned")
+                except Exception as e:
+                    logger.warning(f"Failed to upload preview: {e}")
             except Exception as e:
                 # If we can't read dimensions, upload anyway (fallback)
                 logger.warning(f"Could not read preview dimensions, uploading anyway: {e}")
