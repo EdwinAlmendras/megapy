@@ -1103,19 +1103,110 @@ class MegaClient:
         return dest
     
     def _decrypt_chunk(self, data: bytes, key: bytes, position: int) -> bytes:
-        """Decrypt a file chunk using AES-CTR."""
-        from Crypto.Cipher import AES
-        from Crypto.Util import Counter
+        """
+        Decrypt a file chunk using AES-CTR.
         
-        aes_key = key[:16]
-        iv = key[16:24]
+        Uses MegaDecrypt class for consistent decryption logic.
         
-        nonce = int.from_bytes(iv, 'big')
-        block_num = position // 16
-        ctr = Counter.new(128, initial_value=nonce + block_num)
+        MEGA uses AES-CTR mode for file encryption. The key format is:
+        - key[:16]: AES key (16 bytes)
+        - key[16:24]: Nonce/IV (8 bytes)
+        - key[24:32]: MAC (8 bytes, optional, not used for chunk decryption)
         
-        cipher = AES.new(aes_key, AES.MODE_CTR, counter=ctr)
-        return cipher.decrypt(data)
+        Args:
+            data: Encrypted data chunk to decrypt
+            key: Decryption key (24 or 32 bytes)
+            position: Byte position in the file (for CTR counter calculation)
+            
+        Returns:
+            Decrypted data
+        """
+        from .core.crypto.file import MegaDecrypt
+        
+        # Use MegaDecrypt with position option to handle counter correctly
+        decryptor = MegaDecrypt(key, options={'position': position})
+        # Decrypt without MAC verification (we're just decrypting a chunk)
+        return decryptor.decrypt(data, position=position)
+    
+    async def get_download_url(self, node: 'MegaFile') -> tuple[str, int]:
+        """
+        Get download URL and file size for a node.
+        
+        Args:
+            node: Node to get download URL for
+            
+        Returns:
+            Tuple of (download_url, file_size)
+        """
+        self._ensure_logged_in()
+        
+        result = await self._api.request({
+            'a': 'g',
+            'g': 1,
+            'n': node.handle
+        })
+        
+        download_url = result.get('g')
+        if not download_url:
+            raise ValueError("Could not get download URL")
+        
+        file_size = result.get('s', node.size if hasattr(node, 'size') else 0)
+        return download_url, file_size
+    
+    async def read_file_range(
+        self, 
+        node: 'MegaFile', 
+        offset: int, 
+        size: int
+    ) -> bytes:
+        """
+        Read a range of bytes from a file without downloading the entire file.
+        
+        Args:
+            node: Node to read from
+            offset: Starting byte offset
+            size: Number of bytes to read
+            
+        Returns:
+            Decrypted bytes from the file
+        """
+        self._ensure_logged_in()
+        
+        if node.is_folder:
+            raise ValueError("Cannot read from a folder")
+        
+        # Get download URL
+        download_url, file_size = await self.get_download_url(node)
+        
+        if offset >= file_size or size <= 0:
+            return b""
+        
+        actual_size = min(size, file_size - offset)
+        
+        # Download the range
+        import aiohttp
+        headers = {
+            'Range': f'bytes={offset}-{offset + actual_size - 1}'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(download_url, headers=headers) as response:
+                response.raise_for_status()
+                encrypted_data = await response.read()
+        
+        # Decrypt if node has a key
+        # Note: MEGA files are encrypted, so we always need to decrypt
+        if not node.key:
+            raise ValueError(f"Node {node.handle} does not have a decryption key")
+        
+        # Decrypt the chunk starting from the offset
+        # The position parameter in _decrypt_chunk is the byte offset in the decrypted file
+        from megapy.core.nodes.decryptor import KeyDecryptor
+        from megapy.core.crypto import unmerge_key_mac
+        key = unmerge_key_mac(node.key)
+        
+        decrypted_data = self._decrypt_chunk(encrypted_data, key, offset)
+        return decrypted_data
     
     async def _download_file_attribute(
         self,

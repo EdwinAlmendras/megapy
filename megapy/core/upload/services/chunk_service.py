@@ -54,7 +54,7 @@ class ChunkUploader:
         """Get or create HTTP session."""
         if self._session is None:
             self._session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
+                connector=aiohttp.TCPConnector(limit=100)
             )
             self._owns_session = True
         return self._session

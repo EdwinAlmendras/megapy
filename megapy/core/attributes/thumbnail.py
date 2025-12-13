@@ -7,12 +7,8 @@ from __future__ import annotations
 import io
 from pathlib import Path
 from typing import Union, Optional, BinaryIO
-
-try:
-    from PIL import Image
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+from mediakit.image import OrientationFixer
+from PIL import Image
 
 
 class ThumbnailService:
@@ -33,14 +29,6 @@ class ThumbnailService:
     SIZE = (320, 320) # 240
     QUALITY = 80  # MEGA uses 0.80
     FORMAT = 'JPEG'
-    
-    def __init__(self):
-        if not PIL_AVAILABLE:
-            raise ImportError(
-                "Pillow is required for thumbnail generation. "
-                "Install with: pip install Pillow"
-            )
-    
     def generate(
         self,
         source: Union[str, Path, bytes, BinaryIO],
@@ -69,15 +57,15 @@ class ThumbnailService:
         elif img.mode != 'RGB':
             img = img.convert('RGB')
         
-        if crop_center:
-            # Crop to center square
-            img = self._crop_center_square(img)
+        #if crop_center:
+           # Crop to center square
+        #    img = self._crop_center_square(img)
         
         # Resize to 240x240 TODO i change resize to thumbnail img = img.resize
         #img = img.resize(self.SIZE, Image.Resampling.LANCZOS)
         
         
-        w, h = img.size
+        """ w, h = img.size
         SIZE = self.SIZE[0]
         if w < h:
             new_w = SIZE
@@ -86,9 +74,9 @@ class ThumbnailService:
             new_h = SIZE
             new_w = int(w * SIZE / h)
 
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                
-        # Save as JPEG
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS) """
+        img = OrientationFixer().fix_pil_image(img)
+        img.thumbnail(self.SIZE)
         output = io.BytesIO()
         img.save(output, format=self.FORMAT, quality=self.QUALITY, optimize=True)
         

@@ -314,6 +314,36 @@ class Node:
         result = await self._client.download(self, dest)
         return Path(result) if isinstance(result, str) else result
     
+    async def get_download_url(self) -> tuple[str, int]:
+        """
+        Get download URL and file size for this node.
+        
+        Returns:
+            Tuple of (download_url, file_size)
+        """
+        if not self._client:
+            raise RuntimeError("No client attached")
+        if self.is_folder:
+            raise ValueError("Cannot get download URL for a folder")
+        return await self._client.get_download_url(self)
+    
+    async def read_range(self, offset: int, size: int) -> bytes:
+        """
+        Read a range of bytes from the file without downloading the entire file.
+        
+        Args:
+            offset: Starting byte offset
+            size: Number of bytes to read
+            
+        Returns:
+            Decrypted bytes from the file
+        """
+        if not self._client:
+            raise RuntimeError("No client attached")
+        if self.is_folder:
+            raise ValueError("Cannot read from a folder")
+        return await self._client.read_file_range(self, offset, size)
+    
     async def delete(self) -> bool:
         if not self._client:
             raise RuntimeError("No client attached")
