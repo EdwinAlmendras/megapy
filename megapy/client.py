@@ -307,13 +307,13 @@ class MegaClient:
         # Try to resume existing session
         if self._session.exists():
             session_data = self._session.load()
-            self._logger.info(f"Session data: {session_data}")
+            self._logger.debug(f"Session data: {session_data}")
             if session_data and session_data.is_valid():
-                self._logger.info(f"Session data is valid")
+                self._logger.debug(f"Session data is valid")
                 try:
-                    self._logger.info(f"Trying to resume sessions.. {session_data.email}")
+                    self._logger.debug(f"Trying to resume sessions.. {session_data.email}")
                     await self._resume_session(session_data)
-                    self._logger.info(f"Session resumed for {session_data.email}")
+                    self._logger.debug(f"Session resumed for {session_data.email}")
                     return self
                 except Exception as e:
                     self._logger.warning(f"Failed to resume session {self._session} : {e}")
