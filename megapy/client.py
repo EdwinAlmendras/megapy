@@ -303,17 +303,20 @@ class MegaClient:
         self._api = AsyncAPIClient(self._config)
         await self._api.__aenter__()
         self._auth = AsyncAuthService(self._api)
-        
+        self._logger.info(f"Existing sesino: {self._session}")
         # Try to resume existing session
         if self._session.exists():
             session_data = self._session.load()
+            self._logger.info(f"Session data: {session_data}")
             if session_data and session_data.is_valid():
+                self._logger.info(f"Session data is valid")
                 try:
+                    self._logger.info(f"Trying to resume sessions.. {session_data.email}")
                     await self._resume_session(session_data)
                     self._logger.info(f"Session resumed for {session_data.email}")
                     return self
                 except Exception as e:
-                    self._logger.warning(f"Failed to resume session: {e}")
+                    self._logger.warning(f"Failed to resume session {self._session} : {e}")
                     # Continue to fresh login
         
         # Get credentials
@@ -322,7 +325,6 @@ class MegaClient:
         if password:
             self._password = password
         if not self._email or not self._password:
-            
             self._email, self._password = await self._prompt_credentials()
         
         # Fresh login
