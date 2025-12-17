@@ -880,7 +880,6 @@ class MegaClient:
         
         file_size_mb = result.file_size / (1024 * 1024)
         self._logger.info(f"Upload finished successfully: {path.name} -> {result.node_handle} ({file_size_mb:.2f} MB)")
-        
         return node
     
     async def update(
