@@ -65,7 +65,7 @@ class FolderImporter:
         self,
         source_node: Node,
         target_folder_handle: str,
-        clear_attributes: bool = True
+        clear_attributes: bool = False
     ) -> List[str]:
         """
         Import a folder or file from public link to target folder.
@@ -97,10 +97,7 @@ class FolderImporter:
                 clear_attributes
             )
 
-            print(prepared_nodes)
             logger.debug(f"Prepared {len(prepared_nodes)} nodes for API")
-            
-            # Step 3: Calculate total size
             total_size = sum(
                 node.size for node in all_nodes if not node.is_folder
             )

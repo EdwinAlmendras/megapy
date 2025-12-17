@@ -551,8 +551,7 @@ class MediaProcessor:
         ...     print(f"Thumbnail: {len(result.thumbnail)} bytes")
     """
     
-    IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff'}
-    VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
+    from mediakit import VIDEO_EXTENSIONS, IMAGE_EXTENSIONS
     
     def __init__(
         self,

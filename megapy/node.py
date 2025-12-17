@@ -364,7 +364,7 @@ class Node:
     async def import_link(
         self,
         source: Union[str, 'Node'],
-        clear_attributes: bool = True
+        clear_attributes: bool = False
     ) -> List['Node']:
         """
         Import a file or folder link (with all its children) into this folder.

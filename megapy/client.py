@@ -325,7 +325,7 @@ class MegaClient:
         if password:
             self._password = password
         if not self._email or not self._password:
-            self._email, self._password = await self._prompt_credentials()
+            raise ValueError(f"Email and password are required: Session name: {self._session}")
         
         # Fresh login
         await self._do_login()
@@ -1249,7 +1249,7 @@ class MegaClient:
             result = await self._api.request({
                 'a': 'ufa',
                 'fah': fa_handle,  # base64url handle
-                'ssl': 2,
+                'ssl': 0,
                 'r': 1
             })
         except Exception:
@@ -1268,7 +1268,7 @@ class MegaClient:
         ssl_ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
         connector = aiohttp.TCPConnector(ssl=ssl_ctx)
         
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.post(download_url, data=handle_binary) as resp:
                 if resp.status != 200:
                     return None
@@ -1484,7 +1484,7 @@ class MegaClient:
         self,
         source_node: Union[str, MegaFile, Node],
         target_folder: Union[str, MegaFile, Node],
-        clear_attributes: bool = True
+        clear_attributes: bool = False
     ) -> List[Node]:
         """
         Import a folder or file from public link to target folder.

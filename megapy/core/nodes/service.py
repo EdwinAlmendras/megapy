@@ -32,6 +32,7 @@ class NodeService:
         self._nodes: Dict[str, Node] = {}
         self._root: Optional[Node] = None
         self._root_handle: Optional[str] = None
+        self._raw_f: Optional[List[Dict[str, Any]]] = None  # Raw "f" array from API
     
     @property
     def root(self) -> Optional[Node]:
@@ -53,6 +54,9 @@ class NodeService:
             Root node with full hierarchy
         """
         nodes_data = api_response.get('f', [])
+        
+        # Save raw "f" array for export
+        self._raw_f = nodes_data
         
         self._nodes.clear()
         self._root = None
@@ -80,6 +84,34 @@ class NodeService:
                     parent.children.append(node)
         
         return self._root
+    
+    def export_nodes(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Export raw "f" array for backup/import.
+        
+        Returns:
+            Raw "f" array from last load, or None if not loaded
+        """
+        return self._raw_f
+    
+    def import_nodes(self, nodes_data: List[Dict[str, Any]]) -> Node:
+        """
+        Import nodes from raw "f" array and rebuild tree.
+        
+        Args:
+            nodes_data: Raw "f" array (same format as API response)
+            
+        Returns:
+            Root node with full hierarchy
+        """
+        # Save raw data
+        self._raw_f = nodes_data
+        
+        # Build API response format
+        api_response = {'f': nodes_data}
+        
+        # Use existing load logic
+        return self.load(api_response)
     
     def _create_node(self, data: Dict[str, Any]) -> Optional[Node]:
         """Create a single node from API data."""
