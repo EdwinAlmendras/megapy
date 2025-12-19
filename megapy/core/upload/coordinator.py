@@ -22,6 +22,7 @@ from .models import UploadConfig, UploadResult, UploadProgress, FileAttributes
 from .strategies import MegaChunkingStrategy, MegaEncryptionStrategy
 from .services import FileValidator, AsyncFileReader, ChunkUploader, NodeCreator
 from ..crypto import Base64Encoder
+from megapy.core.api.async_client import AsyncAPIClient
 import logging
 
 logger = logging.getLogger('megapy.upload.coordinator')
@@ -41,7 +42,7 @@ class UploadCoordinator:
     
     def __init__(
         self,
-        api_client,
+        api_client: AsyncAPIClient,
         master_key: bytes,
         chunking_strategy: Optional[ChunkingStrategy] = None,
         encryption_strategy: Optional[EncryptionStrategy] = None,
@@ -317,15 +318,7 @@ class UploadCoordinator:
     async def _get_upload_url(self, file_size: int) -> str:
         """Get upload URL from API."""
         # Support both sync and async clients
-        if hasattr(self._api.request, '__call__'):
-            import inspect
-            if inspect.iscoroutinefunction(self._api.request):
-                result = await self._api.request({'a': 'u', 's': file_size})
-            else:
-                result = self._api.request({'a': 'u', 's': file_size})
-        else:
-            result = self._api.request({'a': 'u', 's': file_size})
-        
+        result = await self._api.request({'a': 'u', 's': file_size})
         if 'p' not in result:
             raise ValueError("Could not obtain upload URL")
         
